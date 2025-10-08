@@ -1,0 +1,395 @@
+"""
+Data caching system for geoDB drill hole data.
+
+This module provides centralized caching for all project drill data,
+reducing API calls and improving performance.
+"""
+
+import bpy
+import json
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+import os
+
+
+class DrillDataCache:
+    """Manager for drill hole data caching."""
+    
+    CACHE_VERSION = "1.1.0"  # Updated for assay range configurations support
+    
+    @staticmethod
+    def get_cache_property():
+        """Get the scene property used for cache storage."""
+        if not hasattr(bpy.types.Scene, 'geodb_data_cache'):
+            bpy.types.Scene.geodb_data_cache = bpy.props.StringProperty(
+                name="geoDB Data Cache",
+                description="Cached drill hole data (JSON)",
+                default=""
+            )
+        return bpy.context.scene.geodb_data_cache
+    
+    @staticmethod
+    def set_cache_property(value: str):
+        """Set the scene property used for cache storage."""
+        bpy.context.scene.geodb_data_cache = value
+    
+    @staticmethod
+    def get_cache() -> Optional[Dict[str, Any]]:
+        """
+        Retrieve cached data for the current project.
+        
+        Returns:
+            Dictionary containing cached data, or None if cache is invalid/empty
+        """
+        try:
+            cache_json = DrillDataCache.get_cache_property()
+            if not cache_json:
+                return None
+            
+            cache_data = json.loads(cache_json)
+            
+            # Validate cache version
+            if cache_data.get('version') != DrillDataCache.CACHE_VERSION:
+                print(f"Cache version mismatch. Expected {DrillDataCache.CACHE_VERSION}, "
+                      f"got {cache_data.get('version')}")
+                return None
+            
+            return cache_data
+        
+        except json.JSONDecodeError as e:
+            print(f"Error decoding cache JSON: {e}")
+            return None
+        except Exception as e:
+            print(f"Error retrieving cache: {e}")
+            return None
+    
+    @staticmethod
+    def set_cache(data: Dict[str, Any]):
+        """
+        Store cached data.
+        
+        Args:
+            data: Dictionary containing all project data
+        """
+        try:
+            # Add metadata
+            cache_data = {
+                'version': DrillDataCache.CACHE_VERSION,
+                'timestamp': datetime.now().isoformat(),
+                **data
+            }
+            
+            # Serialize to JSON
+            cache_json = json.dumps(cache_data, default=str)
+            
+            # Store in scene property
+            DrillDataCache.set_cache_property(cache_json)
+            
+            print(f"Cache updated successfully at {cache_data['timestamp']}")
+            
+        except Exception as e:
+            print(f"Error setting cache: {e}")
+            raise
+    
+    @staticmethod
+    def clear_cache():
+        """Invalidate and clear the cache."""
+        DrillDataCache.set_cache_property("")
+        print("Cache cleared")
+    
+    @staticmethod
+    def is_cache_valid(project_id: int, company_id: int) -> bool:
+        """
+        Check if cache exists and is for the current project.
+        
+        Args:
+            project_id: Current project ID
+            company_id: Current company ID
+            
+        Returns:
+            True if cache is valid for this project
+        """
+        cache = DrillDataCache.get_cache()
+        if cache is None:
+            return False
+        
+        return (cache.get('project_id') == project_id and 
+                cache.get('company_id') == company_id)
+    
+    @staticmethod
+    def get_cache_summary() -> Dict[str, Any]:
+        """
+        Get a summary of cached data for UI display.
+        
+        Returns:
+            Dictionary with cache statistics
+        """
+        cache = DrillDataCache.get_cache()
+        if cache is None:
+            return {
+                'valid': False,
+                'message': 'No cache available'
+            }
+        
+        try:
+            timestamp = datetime.fromisoformat(cache.get('timestamp', ''))
+            time_str = timestamp.strftime('%I:%M %p')
+        except:
+            time_str = 'Unknown'
+        
+        collars = cache.get('collars', [])
+        surveys = cache.get('surveys', {})
+        samples = cache.get('samples', {})
+        lithology = cache.get('lithology', {})
+        alteration = cache.get('alteration', {})
+        desurveyed_traces = cache.get('desurveyed_traces', {})
+        assay_configs = cache.get('assay_range_configs', [])
+        
+        # Count total intervals
+        total_samples = sum(len(v) for v in samples.values()) if isinstance(samples, dict) else 0
+        total_lithology = sum(len(v) for v in lithology.values()) if isinstance(lithology, dict) else 0
+        total_alteration = sum(len(v) for v in alteration.values()) if isinstance(alteration, dict) else 0
+        
+        # Check coordinate system
+        proj_meta = cache.get('project_metadata', {})
+        has_proj4 = bool(proj_meta.get('proj4_string'))
+        
+        # Get available elements and types
+        available_elements = cache.get('available_elements', [])
+        available_lithologies = cache.get('available_lithologies', [])
+        available_alterations = cache.get('available_alterations', [])
+        
+        return {
+            'valid': True,
+            'timestamp': time_str,
+            'project_id': cache.get('project_id'),
+            'company_id': cache.get('company_id'),
+            'project_name': cache.get('project_name'),
+            'company_name': cache.get('company_name'),
+            'collar_count': len(collars),
+            'survey_hole_count': len(surveys),
+            'sample_count': total_samples,
+            'lithology_count': total_lithology,
+            'alteration_count': total_alteration,
+            'assay_config_count': len(assay_configs),
+            'available_elements': available_elements,
+            'available_lithologies': available_lithologies,
+            'available_alterations': available_alterations,
+            'has_validation': 'validation_report' in cache and cache.get('validation_report') is not None,
+            'has_desurveyed_traces': desurveyed_traces is not None and len(desurveyed_traces) > 0,
+            'has_desurveyed_intervals': 'desurveyed_intervals' in cache and cache.get('desurveyed_intervals') is not None,
+            'desurveyed_hole_count': len(desurveyed_traces) if desurveyed_traces else 0,
+            'has_proj4_coords': has_proj4
+        }
+    
+    @staticmethod
+    def save_cache_to_file(filepath: Optional[str] = None):
+        """
+        Save cache to an external JSON file.
+        
+        Args:
+            filepath: Path to save file. If None, saves next to blend file.
+        """
+        cache = DrillDataCache.get_cache()
+        if cache is None:
+            raise ValueError("No cache to save")
+        
+        # Determine filepath
+        if filepath is None:
+            blend_path = bpy.data.filepath
+            if not blend_path:
+                raise ValueError("Blend file must be saved before exporting cache")
+            
+            blend_dir = os.path.dirname(blend_path)
+            project_name = cache.get('project_name', 'unknown')
+            filepath = os.path.join(blend_dir, f"{project_name}_cache.json")
+        
+        # Write to file
+        with open(filepath, 'w') as f:
+            json.dump(cache, f, indent=2, default=str)
+        
+        print(f"Cache saved to: {filepath}")
+        return filepath
+    
+    @staticmethod
+    def load_cache_from_file(filepath: str):
+        """
+        Load cache from an external JSON file.
+        
+        Args:
+            filepath: Path to cache file
+        """
+        with open(filepath, 'r') as f:
+            cache_data = json.load(f)
+        
+        # Validate version
+        if cache_data.get('version') != DrillDataCache.CACHE_VERSION:
+            raise ValueError(f"Cache file version mismatch. Expected {DrillDataCache.CACHE_VERSION}")
+        
+        DrillDataCache.set_cache(cache_data)
+        print(f"Cache loaded from: {filepath}")
+
+
+def create_empty_cache(project_id: int, company_id: int, 
+                       project_name: str, company_name: str, hole_ids: List[int]) -> Dict[str, Any]:
+    """
+    Create an empty cache structure (v1.1).
+    
+    Args:
+        project_id: Project ID
+        company_id: Company ID
+        project_name: Project name
+        company_name: Company name
+        hole_ids: List of drill hole IDs
+        
+    Returns:
+        Empty cache dictionary
+    """
+    return {
+        'project_id': project_id,
+        'company_id': company_id,
+        'project_name': project_name,
+        'company_name': company_name,
+        'hole_ids': hole_ids,
+        'project_metadata': {},  # Coordinate system info (API Phase 2B)
+        'collars': [],
+        'surveys': {},
+        'samples': {},
+        'lithology': {},
+        'alteration': {},
+        'assay_range_configs': [],  # NEW: Assay Range Configurations from API
+        'available_elements': [],  # NEW: List of available assay elements
+        'available_lithologies': [],  # NEW: List of available lithology types
+        'available_alterations': [],  # NEW: List of available alteration types
+        'validation_report': None,
+        'desurveyed_traces': None,  # Borehole traces (XYZ coordinates)
+        'desurveyed_intervals': None  # Sample/lithology/alteration intervals (XYZ)
+    }
+
+
+def run_desurvey_engine(method="minimum_curvature", trace_resolution=1.0, 
+                        desurvey_intervals=True, progress_callback=None) -> bool:
+    """
+    Run the desurvey engine on cached data and store results.
+    
+    This function:
+    1. Retrieves cached collars and surveys
+    2. Desurveyes all borehole traces using proj4 coordinates
+    3. Optionally desurveyes sample/lithology/alteration intervals
+    4. Stores results back in cache
+    
+    Args:
+        method: Desurvey method ("minimum_curvature", "tangential", etc.)
+        trace_resolution: Spacing between trace points in meters (default 1.0)
+        desurvey_intervals: Whether to desurvey intervals (default True)
+        progress_callback: Optional callback(current, total, hole_name)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    from ..utils.desurvey import desurvey_all_holes, desurvey_all_intervals
+    
+    print("\n" + "="*70)
+    print("PHASE 4: DESURVEY ENGINE")
+    print("="*70)
+    
+    # Get cache
+    cache = DrillDataCache.get_cache()
+    if cache is None:
+        print("ERROR: No cache available. Please fetch project data first.")
+        return False
+    
+    # Extract data from cache
+    collars = cache.get('collars', [])
+    surveys = cache.get('surveys', {})
+    samples = cache.get('samples', {})
+    lithology = cache.get('lithology', {})
+    alteration = cache.get('alteration', {})
+    
+    if not collars:
+        print("ERROR: No collars in cache")
+        return False
+    
+    if not surveys:
+        print("ERROR: No surveys in cache")
+        return False
+    
+    # Check for proj4 coordinates
+    proj_meta = cache.get('project_metadata', {})
+    has_proj4 = bool(proj_meta.get('proj4_string'))
+    if has_proj4:
+        print(f"✓ Using Proj4 local coordinate system")
+        print(f"  Proj4 string: {proj_meta.get('proj4_string', '')[:60]}...")
+    else:
+        print("⚠ No Proj4 coordinate system - using fallback coordinates")
+    
+    try:
+        # Step 1: Desurvey all borehole traces
+        print(f"\n[Step 1/2] Desurveying borehole traces...")
+        desurveyed_traces = desurvey_all_holes(
+            collars, 
+            surveys, 
+            method=method,
+            trace_resolution=trace_resolution,
+            progress_callback=progress_callback
+        )
+        
+        if not desurveyed_traces:
+            print("ERROR: Failed to desurvey any holes")
+            return False
+        
+        # Store traces in cache
+        cache['desurveyed_traces'] = desurveyed_traces
+        
+        # Step 2: Desurvey intervals (optional)
+        desurveyed_intervals = None
+        if desurvey_intervals and (samples or lithology or alteration):
+            print(f"\n[Step 2/2] Desurveying intervals...")
+            desurveyed_intervals = desurvey_all_intervals(
+                desurveyed_traces,
+                samples,
+                lithology,
+                alteration
+            )
+            cache['desurveyed_intervals'] = desurveyed_intervals
+        else:
+            print(f"\n[Step 2/2] Skipping interval desurvey (no interval data)")
+        
+        # Update cache
+        DrillDataCache.set_cache(cache)
+        
+        print("\n" + "="*70)
+        print("✓ DESURVEY ENGINE COMPLETE")
+        print("="*70)
+        print(f"  Desurveyed traces: {len(desurveyed_traces)} holes")
+        if desurveyed_intervals:
+            sample_count = sum(len(v) for v in desurveyed_intervals.get('samples', {}).values())
+            lith_count = sum(len(v) for v in desurveyed_intervals.get('lithology', {}).values())
+            alt_count = sum(len(v) for v in desurveyed_intervals.get('alteration', {}).values())
+            print(f"  Desurveyed intervals: {sample_count} samples, {lith_count} lithology, {alt_count} alteration")
+        print(f"  Method: {method}")
+        print(f"  Resolution: {trace_resolution}m")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\nERROR: Desurvey engine failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def register():
+    """Register cache property."""
+    if not hasattr(bpy.types.Scene, 'geodb_data_cache'):
+        bpy.types.Scene.geodb_data_cache = bpy.props.StringProperty(
+            name="geoDB Data Cache",
+            description="Cached drill hole data (JSON)",
+            default=""
+        )
+
+
+def unregister():
+    """Unregister cache property."""
+    if hasattr(bpy.types.Scene, 'geodb_data_cache'):
+        del bpy.types.Scene.geodb_data_cache
