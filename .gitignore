@@ -1,6 +1,20 @@
 # Zencoder IDE files
 .zencoder/
 
+# Claude Code files
+.claude/
+
+# Documentation (contains nested git repo)
+Docs/
+
+# Cline rules
+.clinerules
+
+# Development files
+development env.txt
+force_reload.py
+NUL
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

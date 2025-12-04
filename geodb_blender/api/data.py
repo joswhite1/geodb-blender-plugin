@@ -366,26 +366,39 @@ class GeoDBData:
             return False, []
     
     @staticmethod
-    def get_all_samples_for_project(project_id: int) -> Tuple[bool, Dict[int, List[Dict[str, Any]]]]:
+    def get_all_samples_for_project(project_id: int, assay_config_id: int = None) -> Tuple[bool, Dict[int, List[Dict[str, Any]]]]:
         """Get ALL samples for a project in a single API call.
-        
+
         This is much more efficient than calling get_samples() for each drill hole.
-        
+
         Args:
             project_id: The ID of the project
-            
+            assay_config_id: (v1.4 REQUIRED) AssayRangeConfiguration ID for color/element selection
+
         Returns:
             Tuple[bool, Dict[hole_id, List[samples]]]: Success flag and samples grouped by drill hole ID
         """
         print(f"\n=== Bulk Fetching ALL Samples for Project ID: {project_id} ===")
+        print(f"DEBUG: Received assay_config_id parameter: {assay_config_id}")
+        print(f"DEBUG: Type of assay_config_id: {type(assay_config_id)}")
+        print(f"DEBUG: Boolean check (if assay_config_id): {bool(assay_config_id)}")
+
         client = get_api_client()
         if not client.is_authenticated():
             print("ERROR: Client is not authenticated")
             return False, {}
-        
+
         # Fetch ALL samples for the project in one call
         endpoint = 'drill-samples/'
         params = {'project_id': project_id, 'page_size': 10000}  # Large page size
+
+        # v1.4: REQUIRED - Include assay_config_id for server-side config application
+        if assay_config_id:
+            params['assay_config_id'] = assay_config_id
+            print(f"Using AssayRangeConfiguration ID: {assay_config_id}")
+        else:
+            print(f"WARNING: assay_config_id is falsy, NOT adding to params!")
+
         print(f"Fetching from endpoint: {endpoint} with params: {params}")
         success, data = client.make_request('GET', endpoint, params=params)
         
@@ -909,5 +922,483 @@ class GeoDBData:
         print(f"  - Available Elements: {', '.join(result_data['available_elements'][:5])}..." if len(result_data['available_elements']) > 5 else f"  - Available Elements: {', '.join(result_data['available_elements'])}")
         print(f"  - Available Lithologies: {len(result_data['available_lithologies'])}")
         print(f"  - Available Alterations: {len(result_data['available_alterations'])}")
-        
+
         return True, result_data
+
+    @staticmethod
+    def get_drill_traces(project_id: int) -> Tuple[bool, Dict[int, Dict[str, Any]]]:
+        """Get drill traces (desurveyed paths) for all holes in a project.
+
+        Args:
+            project_id: The ID of the project
+
+        Returns:
+            Tuple[bool, Dict[hole_id, trace_data]]: Success flag and traces by hole ID
+        """
+        print(f"\n=== Fetching Drill Traces for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {}
+
+        endpoint = 'drill-traces/'
+        params = {'project_id': project_id, 'page_size': 1000}
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch drill traces. Response: {data}")
+            return False, {}
+
+        # Extract traces from response
+        traces = []
+        if isinstance(data, dict) and 'results' in data:
+            traces = data['results']
+        elif isinstance(data, list):
+            traces = data
+
+        print(f"Received {len(traces)} drill traces (summary)")
+
+        # Group by drill hole ID
+        traces_by_hole = {}
+        for trace in traces:
+            bhid = trace.get('bhid')
+            if isinstance(bhid, dict):
+                hole_id = bhid.get('id')
+            else:
+                hole_id = bhid
+
+            if hole_id:
+                traces_by_hole[hole_id] = trace
+
+        print(f"Organized {len(traces_by_hole)} traces by hole ID")
+        return True, traces_by_hole
+
+    @staticmethod
+    def get_drill_trace_detail(trace_id: int) -> Tuple[bool, Dict[str, Any]]:
+        """Get full drill trace detail including coordinate arrays.
+
+        Args:
+            trace_id: The ID of the drill trace
+
+        Returns:
+            Tuple[bool, Dict]: Success flag and full trace data with coordinates
+        """
+        print(f"\n=== Fetching Full Drill Trace Detail ID: {trace_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {}
+
+        endpoint = f'drill-traces/{trace_id}/'
+        print(f"Requesting endpoint: {endpoint}")
+        success, data = client.make_request('GET', endpoint)
+
+        if not success:
+            print(f"ERROR: Failed to fetch trace detail. Response: {data}")
+            return False, {}
+
+        # Check if trace_data exists
+        trace_data = data.get('trace_data', {})
+        if trace_data:
+            coords = trace_data.get('coords', [])
+            depths = trace_data.get('depths', [])
+            print(f"Retrieved trace with {len(coords)} coordinate points")
+            print(f"Depth range: {depths[0] if depths else 0} to {depths[-1] if depths else 0}m")
+        else:
+            print("WARNING: No trace_data in response")
+
+        return True, data
+
+    @staticmethod
+    def get_lithology_sets(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Get lithology sets for a project.
+
+        Args:
+            project_id: The ID of the project
+
+        Returns:
+            Tuple[bool, List[Dict]]: Success flag and list of lithology sets
+        """
+        print(f"\n=== Fetching Lithology Sets for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, []
+
+        endpoint = 'drill-lithology-sets/'
+        params = {'project': project_id, 'page_size': 1000}  # API uses 'project' not 'project_id'
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch lithology sets. Response: {data}")
+            return False, []
+
+        # Extract sets from response
+        sets = []
+        if isinstance(data, dict) and 'results' in data:
+            sets = data['results']
+        elif isinstance(data, list):
+            sets = data
+
+        print(f"Retrieved {len(sets)} lithology sets")
+        return True, sets
+
+    @staticmethod
+    def get_alteration_sets(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Get alteration sets for a project.
+
+        Args:
+            project_id: The ID of the project
+
+        Returns:
+            Tuple[bool, List[Dict]]: Success flag and list of alteration sets
+        """
+        print(f"\n=== Fetching Alteration Sets for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, []
+
+        endpoint = 'drill-alteration-sets/'
+        params = {'project': project_id, 'page_size': 1000}  # API uses 'project' not 'project_id'
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch alteration sets. Response: {data}")
+            return False, []
+
+        # Extract sets from response
+        sets = []
+        if isinstance(data, dict) and 'results' in data:
+            sets = data['results']
+        elif isinstance(data, list):
+            sets = data
+
+        print(f"Retrieved {len(sets)} alteration sets")
+        return True, sets
+
+    @staticmethod
+    def get_mineralization_sets(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Get mineralization sets for a project.
+
+        Args:
+            project_id: The ID of the project
+
+        Returns:
+            Tuple[bool, List[Dict]]: Success flag and list of mineralization sets
+        """
+        print(f"\n=== Fetching Mineralization Sets for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, []
+
+        endpoint = 'drill-mineralization-sets/'
+        params = {'project': project_id, 'page_size': 1000}  # API uses 'project' not 'project_id'
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch mineralization sets. Response: {data}")
+            return False, []
+
+        # Extract sets from response
+        sets = []
+        if isinstance(data, dict) and 'results' in data:
+            sets = data['results']
+        elif isinstance(data, list):
+            sets = data
+
+        print(f"Retrieved {len(sets)} mineralization sets")
+        return True, sets
+
+    @staticmethod
+    def get_lithologies_for_project(project_id: int, set_id: int = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
+        """Get all lithology intervals for a project, grouped by drill hole name.
+
+        Args:
+            project_id: The ID of the project
+            set_id: Optional lithology set ID to filter by
+
+        Returns:
+            Tuple[bool, Dict[hole_name, List[intervals]]]: Success flag and lithologies by hole name
+        """
+        print(f"\n=== Fetching Lithologies for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {}
+
+        endpoint = 'drill-lithologies/'
+        params = {'project_id': project_id, 'page_size': 10000}
+        if set_id is not None:
+            params['drill_lithology_set'] = set_id  # API uses 'drill_lithology_set' parameter
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch lithologies. Response: {data}")
+            return False, {}
+
+        # Extract lithologies from response
+        lithologies = []
+        if isinstance(data, dict) and 'results' in data:
+            lithologies = data['results']
+        elif isinstance(data, list):
+            lithologies = data
+
+        print(f"Received {len(lithologies)} lithology intervals")
+
+        # Group by drill hole name (from bhid dict)
+        lithologies_by_hole = {}
+        for lith in lithologies:
+            bhid = lith.get('bhid')
+            hole_name = None
+
+            if isinstance(bhid, dict):
+                # bhid is a dict like {"hole_id": "AUX20-2", "project": "...", "company": "..."}
+                hole_name = bhid.get('hole_id')
+            elif isinstance(bhid, str):
+                hole_name = bhid
+            else:
+                # Fallback to numeric ID if present
+                hole_name = str(bhid) if bhid else None
+
+            if hole_name:
+                if hole_name not in lithologies_by_hole:
+                    lithologies_by_hole[hole_name] = []
+                lithologies_by_hole[hole_name].append(lith)
+
+        print(f"Organized {len(lithologies_by_hole)} holes with lithology data")
+        return True, lithologies_by_hole
+
+    @staticmethod
+    def get_alterations_for_project(project_id: int, set_id: int = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
+        """Get all alteration intervals for a project, grouped by drill hole name.
+
+        Args:
+            project_id: The ID of the project
+            set_id: Optional alteration set ID to filter by
+
+        Returns:
+            Tuple[bool, Dict[hole_name, List[intervals]]]: Success flag and alterations by hole name
+        """
+        print(f"\n=== Fetching Alterations for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {}
+
+        endpoint = 'drill-alterations/'
+        params = {'project_id': project_id, 'page_size': 10000}
+        if set_id is not None:
+            params['drill_alteration_set'] = set_id  # API uses 'drill_alteration_set' parameter
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch alterations. Response: {data}")
+            return False, {}
+
+        # Extract alterations from response
+        alterations = []
+        if isinstance(data, dict) and 'results' in data:
+            alterations = data['results']
+        elif isinstance(data, list):
+            alterations = data
+
+        print(f"Received {len(alterations)} alteration intervals")
+
+        # Group by drill hole name (from bhid dict)
+        alterations_by_hole = {}
+        for alt in alterations:
+            bhid = alt.get('bhid')
+            hole_name = None
+
+            if isinstance(bhid, dict):
+                # bhid is a dict like {"hole_id": "AUX20-2", "project": "...", "company": "..."}
+                hole_name = bhid.get('hole_id')
+            elif isinstance(bhid, str):
+                hole_name = bhid
+            else:
+                # Fallback to numeric ID if present
+                hole_name = str(bhid) if bhid else None
+
+            if hole_name:
+                if hole_name not in alterations_by_hole:
+                    alterations_by_hole[hole_name] = []
+                alterations_by_hole[hole_name].append(alt)
+
+        print(f"Organized {len(alterations_by_hole)} holes with alteration data")
+        return True, alterations_by_hole
+
+    @staticmethod
+    def get_mineralizations_for_project(project_id: int, set_id: int = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
+        """Get all mineralization intervals for a project, grouped by drill hole name.
+
+        Args:
+            project_id: The ID of the project
+            set_id: Optional mineralization set ID to filter by
+
+        Returns:
+            Tuple[bool, Dict[hole_name, List[intervals]]]: Success flag and mineralizations by hole name
+        """
+        print(f"\n=== Fetching Mineralizations for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {}
+
+        endpoint = 'drill-mineralizations/'
+        params = {'project_id': project_id, 'page_size': 10000}
+        if set_id is not None:
+            params['drill_mineralization_set'] = set_id  # API uses 'drill_mineralization_set' parameter
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch mineralizations. Response: {data}")
+            return False, {}
+
+        # Extract mineralizations from response
+        mineralizations = []
+        if isinstance(data, dict) and 'results' in data:
+            mineralizations = data['results']
+        elif isinstance(data, list):
+            mineralizations = data
+
+        print(f"Received {len(mineralizations)} mineralization intervals")
+
+        # Group by drill hole name (from bhid dict)
+        mineralizations_by_hole = {}
+        for min_interval in mineralizations:
+            bhid = min_interval.get('bhid')
+            hole_name = None
+
+            if isinstance(bhid, dict):
+                # bhid is a dict like {"hole_id": "AUX20-2", "project": "...", "company": "..."}
+                hole_name = bhid.get('hole_id')
+            elif isinstance(bhid, str):
+                hole_name = bhid
+            else:
+                # Fallback to numeric ID if present
+                hole_name = str(bhid) if bhid else None
+
+            if hole_name:
+                if hole_name not in mineralizations_by_hole:
+                    mineralizations_by_hole[hole_name] = []
+                mineralizations_by_hole[hole_name].append(min_interval)
+
+        print(f"Organized {len(mineralizations_by_hole)} holes with mineralization data")
+        return True, mineralizations_by_hole
+
+    @staticmethod
+    def get_terrain_mesh(project_code: str, resolution: str = 'low') -> Tuple[bool, Dict[str, Any]]:
+        """
+        Get terrain mesh data with textures for a project.
+
+        This method:
+        1. Fetches latest elevation data from /api/v1/projects/{code}/elevation/latest/
+        2. Extracts terrain_meshes CDN URLs from response
+        3. Downloads mesh JSON directly from CDN
+        4. Returns mesh data ready for Blender
+
+        Args:
+            project_code: The project code (e.g., 'PROJ001')
+            resolution: Mesh resolution - 'very_low', 'low', or 'medium'
+                       very_low: ~62k vertices (fast, mobile)
+                       low: ~250k vertices (balanced, default)
+                       medium: ~1M vertices (high detail)
+
+        Returns:
+            Tuple[bool, Dict]: Success flag and mesh data dict with:
+                - positions: [x1, y1, z1, x2, y2, z2, ...] vertex coordinates
+                - indices: [i1, i2, i3, ...] triangle indices
+                - normals: [nx1, ny1, nz1, ...] vertex normals (optional)
+                - uvs: [u1, v1, u2, v2, ...] texture coordinates (optional)
+                - bounds: {minX, maxX, minY, maxY, minZ, maxZ}
+                - satellite_texture_url: CDN URL for satellite imagery
+                - topo_texture_url: CDN URL for topographic map
+        """
+        print(f"\n=== Fetching Terrain Mesh for Project: {project_code}, Resolution: {resolution} ===")
+
+        import requests
+
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {'error': 'Not authenticated'}
+
+        # Validate resolution
+        valid_resolutions = ['very_low', 'low', 'medium']
+        if resolution not in valid_resolutions:
+            print(f"ERROR: Invalid resolution '{resolution}'. Must be one of: {valid_resolutions}")
+            return False, {'error': f"Invalid resolution. Must be one of: {', '.join(valid_resolutions)}"}
+
+        # Step 1: Get latest elevation data
+        elevation_endpoint = f'projects/{project_code}/elevation/latest/'
+        print(f"Step 1: Requesting elevation data: {elevation_endpoint}")
+
+        success, elevation_data = client.make_request('GET', elevation_endpoint)
+
+        if not success:
+            error_msg = elevation_data.get('error', 'No elevation data available') if isinstance(elevation_data, dict) else str(elevation_data)
+            print(f"ERROR: Failed to fetch elevation data: {error_msg}")
+            return False, {'error': error_msg}
+
+        # Step 2: Extract terrain mesh URL
+        terrain_meshes = elevation_data.get('terrain_meshes', {})
+        if resolution not in terrain_meshes:
+            error_msg = f"Terrain mesh resolution '{resolution}' not available"
+            print(f"ERROR: {error_msg}")
+            print(f"Available resolutions: {list(terrain_meshes.keys())}")
+            return False, {'error': error_msg}
+
+        mesh_url = terrain_meshes[resolution]
+        print(f"Step 2: Mesh URL: {mesh_url}")
+
+        # Step 3: Download mesh JSON from CDN
+        print(f"Step 3: Downloading mesh data from CDN...")
+
+        try:
+            response = requests.get(mesh_url, headers=client.headers, timeout=60)
+            response.raise_for_status()
+            mesh_data = response.json()
+        except Exception as e:
+            error_msg = f"Failed to download mesh: {str(e)}"
+            print(f"ERROR: {error_msg}")
+            return False, {'error': error_msg}
+
+        # Validate mesh structure
+        required_fields = ['positions', 'indices']
+        missing_fields = [f for f in required_fields if f not in mesh_data]
+        if missing_fields:
+            error_msg = f"Invalid mesh data: missing {missing_fields}"
+            print(f"ERROR: {error_msg}")
+            return False, {'error': error_msg}
+
+        # Add texture URLs from elevation data
+        mesh_data['satellite_texture_url'] = elevation_data.get('satellite_imagery_url')
+        mesh_data['topo_texture_url'] = elevation_data.get('topo_imagery_url')
+
+        # Log stats
+        num_vertices = len(mesh_data['positions']) // 3
+        num_triangles = len(mesh_data['indices']) // 3
+        print(f"SUCCESS: Received terrain mesh")
+        print(f"  Vertices: {num_vertices:,}, Triangles: {num_triangles:,}")
+
+        if 'bounds' in mesh_data:
+            bounds = mesh_data['bounds']
+            print(f"  Bounds: X({bounds.get('minX', 0):.2f}, {bounds.get('maxX', 0):.2f}), "
+                  f"Y({bounds.get('minY', 0):.2f}, {bounds.get('maxY', 0):.2f}), "
+                  f"Z({bounds.get('minZ', 0):.2f}, {bounds.get('maxZ', 0):.2f})")
+
+        if mesh_data.get('satellite_texture_url'):
+            print(f"  Satellite Texture Available: Yes")
+        if mesh_data.get('topo_texture_url'):
+            print(f"  Topo Texture Available: Yes")
+
+        return True, mesh_data

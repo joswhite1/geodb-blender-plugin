@@ -11,7 +11,7 @@ import importlib
 from pathlib import Path
 
 import bpy
-from bpy.props import StringProperty, BoolProperty, PointerProperty, EnumProperty, IntProperty
+from bpy.props import StringProperty, BoolProperty, PointerProperty, EnumProperty, IntProperty, FloatProperty
 from bpy.types import PropertyGroup, AddonPreferences
 
 bl_info = {
@@ -29,6 +29,7 @@ bl_info = {
 # Add-on modules
 modules = [
     "api",
+    "operators",
     "ui",
     "core",
     "utils",
@@ -159,7 +160,13 @@ class GeoDBProperties(PropertyGroup):
         description="ID of the selected project",
         default="",
     )
-    
+
+    selected_project_code: StringProperty(
+        name="Selected Project Code",
+        description="Code of the selected project",
+        default="",
+    )
+
     selected_project_name: StringProperty(
         name="Selected Project",
         description="Name of the selected project",
@@ -196,65 +203,160 @@ class GeoDBProperties(PropertyGroup):
         description="Element to use for sample coloring",
         default="",
     )
-    
+
+    # Assay visualization properties
+    selected_assay_config_id: IntProperty(
+        name="Selected Assay Config ID",
+        description="ID of the selected assay range configuration",
+        default=-1,
+    )
+
+    selected_assay_config_name: StringProperty(
+        name="Selected Assay Config Name",
+        description="Name of the selected assay range configuration",
+        default="",
+    )
+
+    selected_assay_units: StringProperty(
+        name="Selected Assay Units",
+        description="Units for the selected assay configuration",
+        default="",
+    )
+
+    selected_assay_default_color: StringProperty(
+        name="Selected Assay Default Color",
+        description="Default color for the selected assay configuration",
+        default="#CCCCCC",
+    )
+
+    selected_assay_ranges: StringProperty(
+        name="Selected Assay Ranges",
+        description="JSON string of the selected assay ranges",
+        default="",
+    )
+
+    assay_diameter_overrides: StringProperty(
+        name="Assay Diameter Overrides",
+        description="JSON string of diameter overrides per config and range (persisted in .blend file)",
+        default="{}",
+    )
+
+    lithology_diameter_overrides: StringProperty(
+        name="Lithology Diameter Overrides",
+        description="JSON string of diameter overrides per set and lithology type (persisted in .blend file)",
+        default="{}",
+    )
+
+    alteration_diameter_overrides: StringProperty(
+        name="Alteration Diameter Overrides",
+        description="JSON string of diameter overrides per set and alteration type (persisted in .blend file)",
+        default="{}",
+    )
+
+    mineralization_diameter_overrides: StringProperty(
+        name="Mineralization Diameter Overrides",
+        description="JSON string of diameter overrides per set and mineralization type (persisted in .blend file)",
+        default="{}",
+    )
+
+    # Selected set IDs for interval visualizations
+    selected_lithology_set_id: IntProperty(
+        name="Selected Lithology Set ID",
+        description="ID of the selected lithology set",
+        default=-1,
+    )
+
+    selected_lithology_set_name: StringProperty(
+        name="Selected Lithology Set Name",
+        description="Name of the selected lithology set",
+        default="",
+    )
+
+    selected_alteration_set_id: IntProperty(
+        name="Selected Alteration Set ID",
+        description="ID of the selected alteration set",
+        default=-1,
+    )
+
+    selected_alteration_set_name: StringProperty(
+        name="Selected Alteration Set Name",
+        description="Name of the selected alteration set",
+        default="",
+    )
+
+    selected_mineralization_set_id: IntProperty(
+        name="Selected Mineralization Set ID",
+        description="ID of the selected mineralization set",
+        default=-1,
+    )
+
+    selected_mineralization_set_name: StringProperty(
+        name="Selected Mineralization Set Name",
+        description="Name of the selected mineralization set",
+        default="",
+    )
+
     trace_segments: StringProperty(
         name="Trace Segments",
         description="Number of segments to use for drill traces",
         default="100",
     )
     
-    # Validation results
-    validation_results: StringProperty(
-        name="Validation Results",
-        description="Validation results from bulk validation operation",
-        default="",
-    )
-    
-    # Validation log file path
-    validation_log_path: StringProperty(
-        name="Validation Log",
-        description="Path to save drill hole validation report",
-        default="",
-        subtype='FILE_PATH',
-    )
-    
-    # Bulk visualization settings
-    bulk_import_mode: EnumProperty(
-        name="Import Mode",
-        description="Choose which drill holes to import",
-        items=[
-            ('ALL', "All Holes", "Import all drill holes in the project"),
-            ('VALID_ONLY', "Valid Only", "Import only holes that pass validation"),
-            ('RANGE', "Range", "Import a range of holes by index"),
-        ],
-        default='ALL',
-    )
-    
-    bulk_start_index: IntProperty(
-        name="Start Index",
-        description="Start index for range import (0-based)",
-        default=0,
-        min=0,
-    )
-    
-    bulk_end_index: IntProperty(
-        name="End Index",
-        description="End index for range import (0-based, inclusive)",
-        default=10,
-        min=0,
-    )
-    
-    bulk_skip_on_error: BoolProperty(
-        name="Skip on Error",
-        description="Skip drill holes that have errors and continue with others",
-        default=True,
-    )
-    
-    bulk_create_straight_holes: BoolProperty(
-        name="Create Straight Holes",
-        description="Create straight holes for collars without survey data",
-        default=True,
-    )
+    # ========================================================================
+    # DEPRECATED: Bulk Import Properties (Not Currently Used)
+    # ========================================================================
+    # TODO: Remove these if bulk import feature is never implemented
+    # or implement bulk import operator if needed
+
+    # validation_results: StringProperty(
+    #     name="Validation Results",
+    #     description="Validation results from bulk validation operation",
+    #     default="",
+    # )
+
+    # validation_log_path: StringProperty(
+    #     name="Validation Log",
+    #     description="Path to save drill hole validation report",
+    #     default="",
+    #     subtype='FILE_PATH',
+    # )
+
+    # bulk_import_mode: EnumProperty(
+    #     name="Import Mode",
+    #     description="Choose which drill holes to import",
+    #     items=[
+    #         ('ALL', "All Holes", "Import all drill holes in the project"),
+    #         ('VALID_ONLY', "Valid Only", "Import only holes that pass validation"),
+    #         ('RANGE', "Range", "Import a range of holes by index"),
+    #     ],
+    #     default='ALL',
+    # )
+
+    # bulk_start_index: IntProperty(
+    #     name="Start Index",
+    #     description="Start index for range import (0-based)",
+    #     default=0,
+    #     min=0,
+    # )
+
+    # bulk_end_index: IntProperty(
+    #     name="End Index",
+    #     description="End index for range import (0-based, inclusive)",
+    #     default=10,
+    #     min=0,
+    # )
+
+    # bulk_skip_on_error: BoolProperty(
+    #     name="Skip on Error",
+    #     description="Skip drill holes that have errors and continue with others",
+    #     default=True,
+    # )
+
+    # bulk_create_straight_holes: BoolProperty(
+    #     name="Create Straight Holes",
+    #     description="Create straight holes for collars without survey data",
+    #     default=True,
+    # )
     
     # ========================================================================
     # NEW: Drill Visualization Workflow Properties
@@ -306,6 +408,30 @@ class GeoDBProperties(PropertyGroup):
         name="Config ID",
         description="Selected assay range configuration ID",
         default=-1,
+    )
+
+    # ========================================================================
+    # Background Operation Progress Properties
+    # ========================================================================
+
+    import_active: BoolProperty(
+        name="Import Active",
+        description="Whether an import operation is currently running",
+        default=False,
+    )
+
+    import_progress: FloatProperty(
+        name="Import Progress",
+        description="Progress of current import operation (0.0 to 1.0)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+    )
+
+    import_status: StringProperty(
+        name="Import Status",
+        description="Status message for current import operation",
+        default="",
     )
 
 # Add-on preferences
@@ -370,21 +496,29 @@ class GEODB_OT_InstallDependencies(bpy.types.Operator):
 def register():
     # Register preferences first (needed for UI)
     bpy.utils.register_class(GeoDBPreferences)
-    
+
     # Register properties
     bpy.utils.register_class(GeoDBProperties)
     bpy.types.Scene.geodb = PointerProperty(type=GeoDBProperties)
-    
+
+    # Register cache property BEFORE modules (needed by data_cache module)
+    if not hasattr(bpy.types.Scene, 'geodb_data_cache'):
+        bpy.types.Scene.geodb_data_cache = bpy.props.StringProperty(
+            name="geoDB Data Cache",
+            description="Cached drill hole data (JSON)",
+            default=""
+        )
+
     # Register dependency installer
     bpy.utils.register_class(GEODB_OT_InstallDependencies)
-    
+
     # Check and install dependencies before importing modules
     if not ensure_dependencies():
         print("geoDB Add-on: Failed to install dependencies automatically.")
         print("Please install dependencies manually using the button in Add-on Preferences.")
         print("Then disable and re-enable the add-on.")
         return
-    
+
     # Register modules only after dependencies are confirmed
     try:
         for module_name in modules:
@@ -413,11 +547,15 @@ def unregister():
     
     # Unregister dependency installer
     bpy.utils.unregister_class(GEODB_OT_InstallDependencies)
-    
+
+    # Unregister cache property
+    if hasattr(bpy.types.Scene, 'geodb_data_cache'):
+        del bpy.types.Scene.geodb_data_cache
+
     # Unregister properties
     del bpy.types.Scene.geodb
     bpy.utils.unregister_class(GeoDBProperties)
-    
+
     # Unregister preferences
     bpy.utils.unregister_class(GeoDBPreferences)
 

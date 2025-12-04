@@ -509,7 +509,7 @@ class GeoDBAPIClient:
                 json=data,
                 params=params,
                 headers=self._get_headers(),
-                timeout=10.0,  # 10 second timeout
+                timeout=60.0,  # 60 second timeout for large datasets
             )
             
             elapsed_time = time.time() - start_time

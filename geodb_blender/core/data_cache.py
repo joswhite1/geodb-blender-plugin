@@ -20,12 +20,8 @@ class DrillDataCache:
     @staticmethod
     def get_cache_property():
         """Get the scene property used for cache storage."""
-        if not hasattr(bpy.types.Scene, 'geodb_data_cache'):
-            bpy.types.Scene.geodb_data_cache = bpy.props.StringProperty(
-                name="geoDB Data Cache",
-                description="Cached drill hole data (JSON)",
-                default=""
-            )
+        # Property should already be registered during addon registration
+        # Don't try to create it dynamically - that causes readonly errors
         return bpy.context.scene.geodb_data_cache
     
     @staticmethod
@@ -380,16 +376,18 @@ def run_desurvey_engine(method="minimum_curvature", trace_resolution=1.0,
 
 
 def register():
-    """Register cache property."""
-    if not hasattr(bpy.types.Scene, 'geodb_data_cache'):
-        bpy.types.Scene.geodb_data_cache = bpy.props.StringProperty(
-            name="geoDB Data Cache",
-            description="Cached drill hole data (JSON)",
-            default=""
-        )
+    """Register cache property.
+
+    Note: The cache property is now registered in the main __init__.py
+    before modules are loaded. This function is kept for compatibility.
+    """
+    pass
 
 
 def unregister():
-    """Unregister cache property."""
-    if hasattr(bpy.types.Scene, 'geodb_data_cache'):
-        del bpy.types.Scene.geodb_data_cache
+    """Unregister cache property.
+
+    Note: The cache property is now unregistered in the main __init__.py.
+    This function is kept for compatibility.
+    """
+    pass

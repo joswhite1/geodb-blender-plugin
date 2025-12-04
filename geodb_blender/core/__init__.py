@@ -7,10 +7,11 @@ data processing, visualization, and analysis.
 
 import bpy
 from .visualization import DrillHoleVisualizer
-from .simulation import (PorphyryCopperSimulator, GoldVeinSimulator, 
+from .simulation import (PorphyryCopperSimulator, GoldVeinSimulator,
                         visualize_simulated_drill_holes)
 from .interpolation import (RBFInterpolator3D, interpolate_from_samples,
                             SCIPY_AVAILABLE)
+from . import data_cache
 
 __all__ = [
     'DrillHoleVisualizer',
@@ -24,7 +25,9 @@ __all__ = [
 
 # Registration
 def register():
-    pass
+    """Register core module components."""
+    data_cache.register()
 
 def unregister():
-    pass
+    """Unregister core module components."""
+    data_cache.unregister()
