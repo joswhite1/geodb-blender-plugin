@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 
-id = "geodb_integration"
+id = "geodb_blender"
 name = "geoDB Integration"
 version = "0.1.0"
 tagline = "Visualize and analyze geological data from geoDB"
