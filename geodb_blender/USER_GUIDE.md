@@ -6,12 +6,20 @@ This guide provides comprehensive documentation for all features of the geoDB Bl
 
 **GitHub Repository:** [https://github.com/joswhite1/geodb-blender-plugin](https://github.com/joswhite1/geodb-blender-plugin)
 
-1. Download the latest release from the [Releases page](https://github.com/joswhite1/geodb-blender-plugin/releases)
-2. In Blender, go to **Edit > Preferences > Add-ons > Install**
-3. Select the downloaded `.zip` file and click **Install Add-on**
-4. Enable the add-on by checking the box next to **3D View: geoDB Integration**
+**Direct Download:** [geodb_blender.zip (v0.1.0)](https://github.com/joswhite1/geodb-blender-plugin/releases/download/v0.1.0/geodb_blender.zip)
+
+### Installation Steps
+
+1. Download [geodb_blender.zip](https://github.com/joswhite1/geodb-blender-plugin/releases/download/v0.1.0/geodb_blender.zip) from the latest release
+2. Open Blender and go to **Edit > Preferences > Add-ons**
+3. Click **Install...** (top right)
+4. Navigate to the downloaded `geodb_blender.zip` file and click **Install Add-on**
+5. Enable the add-on by checking the box next to **3D View: geoDB Integration**
+6. The add-on panel will appear in the 3D Viewport sidebar (press `N` to show)
 
 **Requirements:** Blender 3.0+ and a geoDB account with API access.
+
+**Note:** Do not extract the zip file - Blender installs directly from the .zip archive.
 
 ---
 

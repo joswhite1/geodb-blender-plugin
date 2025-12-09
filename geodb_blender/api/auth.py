@@ -15,25 +15,40 @@ from .. import is_dev_mode_enabled
 # Global API client instance
 api_client = None
 
+def get_addon_name():
+    """Get the addon name for preferences lookup.
+
+    When installed as a Blender 4.2+ extension, the addon name includes
+    the extension path prefix (e.g., 'bl_ext.user_default.geodb_blender').
+    This function returns the correct name for the current installation.
+    """
+    # __name__ for this module is something like 'geodb_blender.api.auth'
+    # or 'bl_ext.user_default.geodb_blender.api.auth'
+    # We need the root package name
+    return __name__.rsplit('.', 2)[0]  # Remove '.api.auth' suffix
+
+
 def get_api_client(use_dev_server=False):
     """Get the global API client instance.
-    
+
     Args:
         use_dev_server: Whether to use the development server.
-        
+
     Returns:
         The API client instance.
     """
     global api_client
-    
+
     if api_client is None:
         # Get development server preference
-        preferences = bpy.context.preferences.addons["geodb_blender"].preferences
+        addon_name = get_addon_name()
+        addon_prefs = bpy.context.preferences.addons.get(addon_name)
+        preferences = addon_prefs.preferences if addon_prefs else None
         use_dev = preferences.use_dev_server if preferences else use_dev_server
-        
+
         # Create API client
         api_client = GeoDBAPIClient(use_dev_server=use_dev)
-    
+
     return api_client
 
 def reset_api_client():
@@ -258,7 +273,7 @@ class GEODB_OT_ResetAPIClient(Operator):
     
     def execute(self, context):
         # Get addon preferences
-        preferences = context.preferences.addons.get("geodb_blender")
+        preferences = context.preferences.addons.get(get_addon_name())
         if preferences:
             # Toggle the server setting
             preferences.preferences.use_dev_server = not preferences.preferences.use_dev_server
@@ -298,7 +313,7 @@ class GEODB_PT_Authentication(Panel):
 
         # Show server status (only in development mode)
         if is_dev_mode_enabled():
-            preferences = context.preferences.addons.get("geodb_blender")
+            preferences = context.preferences.addons.get(get_addon_name())
             if preferences:
                 box = layout.box()
                 if preferences.preferences.use_dev_server:
