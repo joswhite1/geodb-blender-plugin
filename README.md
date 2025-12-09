@@ -6,7 +6,7 @@ A Blender extension for visualizing and analyzing geological drill hole data fro
 
 ### From Release (Recommended)
 
-1. Download `geodb_blender.zip` from the [Releases](https://github.com/aquaterra/geodb-blender-plugin/releases) page
+1. Download `geodb_blender.zip` from the [Releases](https://github.com/joswhite1/geodb-blender-plugin/releases) page
 2. In Blender, go to **Edit → Preferences → Add-ons**
 3. Click **Install from Disk** and select the downloaded zip
 4. Enable the add-on

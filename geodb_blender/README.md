@@ -19,7 +19,7 @@ For detailed documentation on all features, see the [User Guide](USER_GUIDE.md).
 
 ## Installation
 
-1. Download the latest release from the [Releases](https://github.com/aquaterra/geodb-blender-plugin/releases) page
+1. Download the latest release from the [Releases](https://github.com/joswhite1/geodb-blender-plugin/releases) page
 2. In Blender, go to Edit > Preferences > Add-ons > Install
 3. Select the downloaded zip file and click "Install Add-on"
 4. Enable the add-on by checking the box next to "3D View: geoDB Integration"
