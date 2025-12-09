@@ -70,16 +70,16 @@ def desurvey_minimum_curvature(collar, surveys, target_depth):
     
     dx1 = np.sin(dip1) * np.sin(az1)
     dy1 = np.sin(dip1) * np.cos(az1)
-    dz1 = np.cos(dip1)
+    dz1 = -np.cos(dip1)  # Negate so drilling down produces negative z
     dx2 = np.sin(dip2) * np.sin(az2)
     dy2 = np.sin(dip2) * np.cos(az2)
-    dz2 = np.cos(dip2)
-    
+    dz2 = -np.cos(dip2)  # Negate so drilling down produces negative z
+
     disp = interval_length * rf / 2.0
     dx = disp * ((1 - beta) * dx1 + beta * dx2)
     dy = disp * ((1 - beta) * dy1 + beta * dy2)
     dz = disp * ((1 - beta) * dz1 + beta * dz2)
-    
+
     x, y, z = x0, y0, z0
     for j in range(i):
         d1, d2 = survey_depths[j], survey_depths[j + 1]
@@ -87,19 +87,19 @@ def desurvey_minimum_curvature(collar, surveys, target_depth):
         az2, dip2 = azimuths[j], dips[j]
         if j > 0:
             az1, dip1 = azimuths[j - 1], dips[j - 1]
-        
+
         cos_dl = np.sin(dip1) * np.sin(dip2) * np.cos(az1 - az2) + np.cos(dip1) * np.cos(dip2)
         cos_dl = np.clip(cos_dl, -1.0, 1.0)
         dl = np.arccos(cos_dl)
         rf = 1.0 if dl == 0 else 2.0 * np.tan(dl / 2.0) / dl
-        
+
         dx1 = np.sin(dip1) * np.sin(az1)
         dy1 = np.sin(dip1) * np.cos(az1)
-        dz1 = np.cos(dip1)
+        dz1 = -np.cos(dip1)  # Negate so drilling down produces negative z
         dx2 = np.sin(dip2) * np.sin(az2)
         dy2 = np.sin(dip2) * np.cos(az2)
-        dz2 = np.cos(dip2)
-        
+        dz2 = -np.cos(dip2)  # Negate so drilling down produces negative z
+
         disp = (d2 - d1) * rf / 2.0
         x += disp * (dx1 + dx2)
         y += disp * (dy1 + dy2)
@@ -142,7 +142,8 @@ class DrillholeDesurvey:
         
         self.dx = np.sin(self.dips) * np.sin(self.azimuths)
         self.dy = np.sin(self.dips) * np.cos(self.azimuths)
-        self.dz = np.cos(self.dips)
+        # Negate dz so that drilling down (negative dip) produces negative z
+        self.dz = -np.cos(self.dips)
         
         self.doglegs = np.zeros(self.n_surveys)
         self.rf = np.ones(self.n_surveys)
@@ -540,250 +541,3 @@ def create_drill_sample_meshes(collar, surveys, samples, name_prefix="Sample"):
     """
     sample_data = calculate_drill_sample_coords(collar, surveys, samples)
     return create_drill_sample_meshes_from_coords(sample_data, name_prefix)
-
-
-# =============================================================================
-# PHASE 4: BULK DESURVEY ENGINE (API Phase 2B Integration)
-# =============================================================================
-
-def desurvey_all_holes(collars, surveys_by_hole, method="minimum_curvature", 
-                        trace_resolution=1.0, progress_callback=None):
-    """
-    Desurvey all drill holes in a project efficiently.
-    
-    This function uses the proj4 local coordinates from the API (Phase 2B) as
-    collar positions. No coordinate transformations are needed - the API provides
-    coordinates already optimized for Blender's viewport.
-    
-    Args:
-        collars: List of collar dictionaries from API with fields:
-            - id: int, collar ID
-            - name: str, hole name
-            - proj4_easting: float, X coordinate in local system (PREFERRED)
-            - proj4_northing: float, Y coordinate in local system (PREFERRED)
-            - proj4_elevation: float, Z coordinate in local system
-            - easting, northing, elevation: fallback coordinates
-            - total_depth: float, maximum depth
-            
-        surveys_by_hole: Dict[hole_id, List[survey_dicts]]
-            Each survey dict has: azimuth, dip, depth
-            
-        method: str, desurvey method ("minimum_curvature", "tangential", etc.)
-        
-        trace_resolution: float, spacing between trace points in meters
-            Default 1.0 = one point per meter
-            
-        progress_callback: Optional callable(current, total, hole_name) for progress updates
-    
-    Returns:
-        Dict[hole_id, dict] with desurveyed data:
-            {
-                hole_id: {
-                    'name': str,
-                    'collar_x': float,
-                    'collar_y': float, 
-                    'collar_z': float,
-                    'total_depth': float,
-                    'trace_points': np.ndarray shape (N, 3),  # XYZ coordinates
-                    'trace_depths': np.ndarray shape (N,),    # Corresponding depths
-                    'survey_count': int
-                }
-            }
-    """
-    from ..api.data import GeoDBData
-    
-    print(f"\n=== Bulk Desurveying {len(collars)} Drill Holes ===")
-    print(f"Method: {method}")
-    print(f"Trace resolution: {trace_resolution}m")
-    
-    desurveyed_data = {}
-    
-    for i, collar_dict in enumerate(collars):
-        hole_id = collar_dict.get('id')
-        hole_name = collar_dict.get('name', f'Hole_{hole_id}')
-        
-        # Progress callback
-        if progress_callback:
-            progress_callback(i, len(collars), hole_name)
-        
-        # Extract collar coordinates (uses proj4 fields if available)
-        collar_coords = GeoDBData.extract_collar_coordinates(collar_dict)
-        x0, y0, z0, total_depth = collar_coords
-        
-        # Get surveys for this hole
-        surveys = surveys_by_hole.get(hole_id, [])
-        
-        if not surveys:
-            print(f"  [{i+1}/{len(collars)}] {hole_name}: No surveys - skipping")
-            continue
-        
-        # Format surveys for desurvey engine
-        formatted_surveys = GeoDBData.format_surveys_for_desurvey(surveys)
-        
-        if not formatted_surveys:
-            print(f"  [{i+1}/{len(collars)}] {hole_name}: Invalid survey data - skipping")
-            continue
-        
-        try:
-            # Create desurvey object
-            collar = (x0, y0, z0, total_depth)
-            desurvey_obj = DrillholeDesurvey(collar, formatted_surveys)
-            
-            # Generate trace points at regular intervals
-            max_survey_depth = formatted_surveys[-1][2]  # Last survey depth
-            trace_depth = min(total_depth, max_survey_depth)
-            
-            # Create depth array with specified resolution
-            num_points = int(trace_depth / trace_resolution) + 1
-            target_depths = np.linspace(0, trace_depth, num_points)
-            
-            # Desurvey all points
-            trace_points = desurvey_obj.desurvey_batch(target_depths, method=method)
-            
-            # Store desurveyed data
-            desurveyed_data[hole_id] = {
-                'name': hole_name,
-                'collar_x': x0,
-                'collar_y': y0,
-                'collar_z': z0,
-                'total_depth': total_depth,
-                'trace_points': trace_points,  # np.ndarray (N, 3)
-                'trace_depths': target_depths,  # np.ndarray (N,)
-                'survey_count': len(surveys),
-                'method': method
-            }
-            
-            print(f"  [{i+1}/{len(collars)}] {hole_name}: ✓ {len(trace_points)} points "
-                  f"({len(surveys)} surveys, {trace_depth:.1f}m)")
-        
-        except Exception as e:
-            print(f"  [{i+1}/{len(collars)}] {hole_name}: ERROR - {str(e)}")
-            continue
-    
-    print(f"\n✓ Desurveyed {len(desurveyed_data)} / {len(collars)} holes successfully")
-    
-    return desurveyed_data
-
-
-def desurvey_intervals_for_hole(hole_desurveyed_data, intervals):
-    """
-    Calculate XYZ coordinates for interval boundaries (samples, lithology, alteration).
-    
-    This function takes pre-desurveyed trace data and interpolates coordinates
-    for specific depths (interval boundaries).
-    
-    Args:
-        hole_desurveyed_data: dict with keys:
-            - trace_points: np.ndarray (N, 3) of XYZ coordinates
-            - trace_depths: np.ndarray (N,) of corresponding depths
-            
-        intervals: List of dicts with 'depth_from' and 'depth_to' fields
-    
-    Returns:
-        List of dicts with added fields:
-            - xyz_from: tuple (x, y, z) at depth_from
-            - xyz_to: tuple (x, y, z) at depth_to
-    """
-    trace_points = hole_desurveyed_data['trace_points']
-    trace_depths = hole_desurveyed_data['trace_depths']
-    
-    result_intervals = []
-    
-    for interval in intervals:
-        depth_from = interval.get('depth_from', 0.0)
-        depth_to = interval.get('depth_to', 0.0)
-        
-        # Interpolate coordinates at depth_from
-        idx_from = np.searchsorted(trace_depths, depth_from)
-        if idx_from == 0:
-            xyz_from = tuple(trace_points[0])
-        elif idx_from >= len(trace_depths):
-            xyz_from = tuple(trace_points[-1])
-        else:
-            # Linear interpolation between points
-            d1, d2 = trace_depths[idx_from-1], trace_depths[idx_from]
-            p1, p2 = trace_points[idx_from-1], trace_points[idx_from]
-            alpha = (depth_from - d1) / (d2 - d1) if d2 != d1 else 0.0
-            xyz_from = tuple(p1 + alpha * (p2 - p1))
-        
-        # Interpolate coordinates at depth_to
-        idx_to = np.searchsorted(trace_depths, depth_to)
-        if idx_to == 0:
-            xyz_to = tuple(trace_points[0])
-        elif idx_to >= len(trace_depths):
-            xyz_to = tuple(trace_points[-1])
-        else:
-            d1, d2 = trace_depths[idx_to-1], trace_depths[idx_to]
-            p1, p2 = trace_points[idx_to-1], trace_points[idx_to]
-            alpha = (depth_to - d1) / (d2 - d1) if d2 != d1 else 0.0
-            xyz_to = tuple(p1 + alpha * (p2 - p1))
-        
-        # Add to result
-        result_interval = interval.copy()
-        result_interval['xyz_from'] = xyz_from
-        result_interval['xyz_to'] = xyz_to
-        result_intervals.append(result_interval)
-    
-    return result_intervals
-
-
-def desurvey_all_intervals(desurveyed_traces, samples_by_hole, 
-                           lithology_by_hole=None, alteration_by_hole=None):
-    """
-    Calculate XYZ coordinates for all sample/lithology/alteration intervals.
-    
-    Args:
-        desurveyed_traces: Dict[hole_id, desurveyed_data] from desurvey_all_holes()
-        samples_by_hole: Dict[hole_id, List[sample_dicts]]
-        lithology_by_hole: Dict[hole_id, List[lithology_dicts]] (optional)
-        alteration_by_hole: Dict[hole_id, List[alteration_dicts]] (optional)
-    
-    Returns:
-        Dict with keys 'samples', 'lithology', 'alteration':
-            {
-                'samples': Dict[hole_id, List[sample_dicts_with_xyz]],
-                'lithology': Dict[hole_id, List[lithology_dicts_with_xyz]],
-                'alteration': Dict[hole_id, List[alteration_dicts_with_xyz]]
-            }
-    """
-    print(f"\n=== Desurveying Intervals for {len(desurveyed_traces)} Holes ===")
-    
-    result = {
-        'samples': {},
-        'lithology': {},
-        'alteration': {}
-    }
-    
-    # Process samples
-    print(f"Processing samples...")
-    sample_count = 0
-    for hole_id, hole_data in desurveyed_traces.items():
-        samples = samples_by_hole.get(hole_id, [])
-        if samples:
-            result['samples'][hole_id] = desurvey_intervals_for_hole(hole_data, samples)
-            sample_count += len(samples)
-    print(f"  ✓ Desurveyed {sample_count} sample intervals")
-    
-    # Process lithology
-    if lithology_by_hole:
-        print(f"Processing lithology...")
-        lith_count = 0
-        for hole_id, hole_data in desurveyed_traces.items():
-            lithology = lithology_by_hole.get(hole_id, [])
-            if lithology:
-                result['lithology'][hole_id] = desurvey_intervals_for_hole(hole_data, lithology)
-                lith_count += len(lithology)
-        print(f"  ✓ Desurveyed {lith_count} lithology intervals")
-    
-    # Process alteration
-    if alteration_by_hole:
-        print(f"Processing alteration...")
-        alt_count = 0
-        for hole_id, hole_data in desurveyed_traces.items():
-            alteration = alteration_by_hole.get(hole_id, [])
-            if alteration:
-                result['alteration'][hole_id] = desurvey_intervals_for_hole(hole_data, alteration)
-                alt_count += len(alteration)
-        print(f"  ✓ Desurveyed {alt_count} alteration intervals")
-    
-    return result

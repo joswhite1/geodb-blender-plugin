@@ -18,6 +18,7 @@ from ..utils.interval_visualization import (
     get_color_for_alteration
 )
 from ..utils.object_properties import GeoDBObjectProperties
+from .drill_visualization_panel import adjust_view_to_objects
 
 
 def get_lithology_sets_enum(self, context):
@@ -193,6 +194,7 @@ class GEODB_OT_VisualizeLithology(Operator):
 
         total_intervals = 0
         lithology_collections = {}
+        created_objects = []  # Track created objects for view adjustment
 
         # Build name-to-ID mapping for collars
         collar_id_by_name = {}
@@ -304,6 +306,7 @@ class GEODB_OT_VisualizeLithology(Operator):
                         tube_obj['geodb_hole_name'] = hole_name
                         tube_obj['geodb_lithology'] = lith_name
 
+                        created_objects.append(tube_obj)
                         total_intervals += 1
 
                 except Exception as e:
@@ -311,6 +314,9 @@ class GEODB_OT_VisualizeLithology(Operator):
                     import traceback
                     traceback.print_exc()
                     continue
+
+        # Auto-adjust view to newly created objects
+        adjust_view_to_objects(context, created_objects)
 
         self.report({'INFO'}, f"Created {total_intervals} lithology interval tubes in {len(lithology_collections)} lithology types")
         return {'FINISHED'}
@@ -419,6 +425,7 @@ class GEODB_OT_VisualizeAlteration(Operator):
 
         total_intervals = 0
         alteration_collections = {}
+        created_objects = []  # Track created objects for view adjustment
 
         # Build name-to-ID mapping for collars
         collar_id_by_name = {}
@@ -530,6 +537,7 @@ class GEODB_OT_VisualizeAlteration(Operator):
                         tube_obj['geodb_hole_name'] = hole_name
                         tube_obj['geodb_alteration'] = alt_name
 
+                        created_objects.append(tube_obj)
                         total_intervals += 1
 
                 except Exception as e:
@@ -537,6 +545,9 @@ class GEODB_OT_VisualizeAlteration(Operator):
                     import traceback
                     traceback.print_exc()
                     continue
+
+        # Auto-adjust view to newly created objects
+        adjust_view_to_objects(context, created_objects)
 
         self.report({'INFO'}, f"Created {total_intervals} alteration interval tubes in {len(alteration_collections)} alteration types")
         return {'FINISHED'}
@@ -643,6 +654,7 @@ class GEODB_OT_VisualizeMineralization(Operator):
         # Process each mineralization assemblage type
         mineralization_collections = {}
         total_intervals = 0
+        created_objects = []  # Track created objects for view adjustment
 
         for hole_name, min_intervals in mineralization_data.items():
             print(f"Processing mineralization intervals for {hole_name}: {len(min_intervals)} intervals")
@@ -736,6 +748,7 @@ class GEODB_OT_VisualizeMineralization(Operator):
                         tube_obj['geodb_hole_name'] = hole_name
                         tube_obj['geodb_mineralization'] = min_name
 
+                        created_objects.append(tube_obj)
                         total_intervals += 1
 
                 except Exception as e:
@@ -743,6 +756,9 @@ class GEODB_OT_VisualizeMineralization(Operator):
                     import traceback
                     traceback.print_exc()
                     continue
+
+        # Auto-adjust view to newly created objects
+        adjust_view_to_objects(context, created_objects)
 
         self.report({'INFO'}, f"Created {total_intervals} mineralization interval tubes in {len(mineralization_collections)} mineralization types")
         return {'FINISHED'}

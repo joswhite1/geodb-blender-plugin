@@ -15,11 +15,10 @@ from bpy.types import Panel, Operator
 from bpy.props import EnumProperty, FloatProperty, IntProperty
 
 from ..api.data import GeoDBData
+from ..core.data_cache import DrillDataCache
 from ..utils.interval_visualization import (
     create_interval_tube,
-    apply_material_to_interval,
-    get_color_for_lithology,
-    get_color_for_alteration
+    apply_material_to_interval
 )
 from ..utils.cylinder_mesh import create_sample_cylinder_mesh, hex_to_rgb
 from ..utils.object_properties import GeoDBObjectProperties
@@ -29,50 +28,65 @@ from ..utils.object_properties import GeoDBObjectProperties
 # UTILITY FUNCTIONS
 # ============================================================================
 
-def get_lithology_sets_enum(self, context):
-    """Dynamic enum callback for lithology sets"""
-    items = [('0', 'All Sets', 'Visualize all lithology sets combined', 0)]
+def adjust_view_to_objects(context, objects):
+    """
+    Adjust the 3D viewport to frame the given objects.
+    Sets orthographic view, clip end to 10000, and frames the objects.
 
-    scene = context.scene
-    if not hasattr(scene, 'geodb') or not scene.geodb.selected_project_id:
-        return items
+    Args:
+        context: Blender context
+        objects: List of Blender objects to frame
+    """
+    if not objects:
+        return
 
-    try:
-        project_id = int(scene.geodb.selected_project_id)
-        success, sets = GeoDBData.get_lithology_sets(project_id)
+    # Check if auto-adjust is enabled
+    if not context.scene.geodb.auto_adjust_view:
+        return
 
-        if success and sets:
-            for idx, lith_set in enumerate(sets):
-                set_id = str(lith_set.get('id', idx))
-                set_name = lith_set.get('name', f'Set {idx + 1}')
-                items.append((set_id, set_name, f'Visualize {set_name}', idx + 1))
-    except Exception as e:
-        print(f"Error fetching lithology sets: {e}")
+    from mathutils import Vector, Euler
+    import math
 
-    return items
+    # Calculate bounding box of all objects
+    all_corners = []
+    for obj in objects:
+        if obj.type == 'MESH' and obj.data:
+            all_corners.extend([obj.matrix_world @ Vector(corner) for corner in obj.bound_box])
 
+    if not all_corners:
+        return
 
-def get_alteration_sets_enum(self, context):
-    """Dynamic enum callback for alteration sets"""
-    items = [('0', 'All Sets', 'Visualize all alteration sets combined', 0)]
+    # Calculate center and size
+    min_coord = Vector((min(c[i] for c in all_corners) for i in range(3)))
+    max_coord = Vector((max(c[i] for c in all_corners) for i in range(3)))
+    center = (min_coord + max_coord) / 2
+    size = (max_coord - min_coord).length
 
-    scene = context.scene
-    if not hasattr(scene, 'geodb') or not scene.geodb.selected_project_id:
-        return items
+    if size == 0:
+        size = 100  # Default size if objects have no volume
 
-    try:
-        project_id = int(scene.geodb.selected_project_id)
-        success, sets = GeoDBData.get_alteration_sets(project_id)
+    # Find and configure the 3D viewport
+    for area in context.screen.areas:
+        if area.type == 'VIEW_3D':
+            space = area.spaces.active
+            region_3d = space.region_3d
 
-        if success and sets:
-            for idx, alt_set in enumerate(sets):
-                set_id = str(alt_set.get('id', idx))
-                set_name = alt_set.get('name', f'Set {idx + 1}')
-                items.append((set_id, set_name, f'Visualize {set_name}', idx + 1))
-    except Exception as e:
-        print(f"Error fetching alteration sets: {e}")
+            # 1. Set to orthographic view
+            region_3d.view_perspective = 'ORTHO'
 
-    return items
+            # 2. Set clip end to 50000
+            space.clip_end = 50000
+
+            # 3. Set view rotation (60 degrees down, 45 degrees rotated - nice 3/4 view)
+            region_3d.view_rotation = Euler(
+                (math.radians(60), 0, math.radians(45))
+            ).to_quaternion()
+
+            # 4. Set view location and distance
+            region_3d.view_location = center
+            region_3d.view_distance = size * 1.5
+
+            break
 
 
 def hex_to_rgba(hex_color):
@@ -1178,6 +1192,36 @@ class GEODB_OT_VisualizeAssays(Operator):
         total_samples = sum(len(v) for v in samples_by_hole.values())
         print(f"Fetched {total_samples} samples across {len(samples_by_hole)} holes")
 
+        # =====================================================================
+        # Save sample data to DrillDataCache for RBF interpolation
+        # =====================================================================
+        # Extract available elements from the fetched samples
+        available_elements = set()
+        for hole_samples in samples_by_hole.values():
+            for sample in hole_samples:
+                assay = sample.get('assay')
+                if assay and isinstance(assay, dict):
+                    elements_list = assay.get('elements', [])
+                    for elem in elements_list:
+                        if isinstance(elem, dict):
+                            elem_name = elem.get('element')
+                            if elem_name:
+                                available_elements.add(elem_name)
+
+        # Update cache with sample data so RBF interpolation can use it
+        cache_data = {
+            'project_id': project_id,
+            'company_id': int(props.selected_company_id) if hasattr(props, 'selected_company_id') and props.selected_company_id else 0,
+            'project_name': project_name,
+            'company_name': props.selected_company_name if hasattr(props, 'selected_company_name') else '',
+            'samples': samples_by_hole,
+            'available_elements': sorted(list(available_elements)),
+            'assay_range_configs': configs,  # Save the assay configs too
+        }
+        DrillDataCache.set_cache(cache_data)
+        print(f"✓ Saved {total_samples} samples to DrillDataCache with {len(available_elements)} available elements")
+        print(f"  Elements: {sorted(list(available_elements))}")
+
         # Create master collection
         master_collection = bpy.data.collections.new(config_name)
         bpy.context.scene.collection.children.link(master_collection)
@@ -1235,7 +1279,6 @@ class GEODB_OT_VisualizeAssays(Operator):
                     if elem_name:
                         method_unit = elem.get('method_unit', {})
                         all_assay_data[f"element_{elem_name}"] = {
-                            "element": elem_name,
                             "value": elem.get('value'),
                             "units": method_unit.get('units') if isinstance(method_unit, dict) else None,
                             "method_name": method_unit.get('method') if isinstance(method_unit, dict) else None,
@@ -1360,414 +1403,16 @@ class GEODB_OT_VisualizeAssays(Operator):
                 mesh_obj['hole_name'] = mesh_data['hole_name']
                 mesh_obj['active_range_label'] = mesh_data['label']
 
+        # Auto-adjust view to newly created objects
+        created_objects = [mesh_data['obj'] for hole_data in all_holes_data for mesh_data in hole_data['meshes']]
+        adjust_view_to_objects(context, created_objects)
+
         self.report(
             {'INFO'},
             f"Created {total_meshes_created} meshes in {holes_with_meshes} holes (Skipped: {total_skipped})"
         )
 
         return {'FINISHED'}
-
-
-# DEPRECATED: This operator is not currently used. The active lithology visualization
-# operator is in interval_visualization_panel.py. This code is kept for reference only.
-class GEODB_OT_VisualizeLithology(Operator):
-    """DEPRECATED - Visualize lithology intervals as curved tubes (use interval_visualization_panel.py instead)"""
-    bl_idname = "geodb.visualize_lithology_deprecated"
-    bl_label = "Visualize Lithology (Deprecated)"
-    bl_description = "DEPRECATED - Use the operator in interval_visualization_panel.py instead"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    set_selection: EnumProperty(
-        name="Lithology Set",
-        description="Select lithology set to visualize",
-        items=get_lithology_sets_enum
-    )
-
-    tube_radius: FloatProperty(
-        name="Tube Radius",
-        description="Radius of the lithology tubes",
-        default=0.15,
-        min=0.01,
-        max=2.0
-    )
-
-    tube_resolution: IntProperty(
-        name="Resolution",
-        description="Number of vertices around tube circumference",
-        default=8,
-        min=3,
-        max=32
-    )
-
-    def execute(self, context):
-        scene = context.scene
-        print("DEBUG: ========== GEODB_OT_VisualizeLithology.execute() CALLED ==========")
-        props = scene.geodb
-
-        if not hasattr(props, 'selected_project_id') or not props.selected_project_id:
-            self.report({'ERROR'}, "No project selected")
-            return {'CANCELLED'}
-
-        project_id = int(props.selected_project_id)
-        selected_set_id = int(self.set_selection)
-
-        # Load diameter overrides from persistent storage
-        import json
-        try:
-            diameter_overrides = json.loads(props.lithology_diameter_overrides)
-        except (json.JSONDecodeError, AttributeError):
-            diameter_overrides = {}
-
-        if selected_set_id > 0:
-            use_set_id = selected_set_id
-            set_name = f"set_{selected_set_id}"
-
-            success, lith_sets = GeoDBData.get_lithology_sets(project_id)
-            if success and lith_sets:
-                for lith_set in lith_sets:
-                    if lith_set.get('id') == selected_set_id:
-                        set_name = lith_set.get('name', set_name)
-                        break
-        else:
-            set_name = 'all'
-            use_set_id = None
-
-        # Fetch data
-        success, collars = GeoDBData.get_drill_holes(project_id)
-        if not success or not collars:
-            self.report({'ERROR'}, "Failed to fetch drill collars")
-            return {'CANCELLED'}
-
-        success, lithology_data = GeoDBData.get_lithologies_for_project(project_id, use_set_id)
-        if not success or not lithology_data:
-            self.report({'ERROR'}, "Failed to fetch lithology data")
-            return {'CANCELLED'}
-
-        success, traces_by_hole = GeoDBData.get_drill_traces(project_id)
-        if not success:
-            self.report({'ERROR'}, "Failed to fetch drill traces")
-            return {'CANCELLED'}
-
-        # Create main collection
-        main_collection_name = f"lithology_{set_name}"
-        if main_collection_name in bpy.data.collections:
-            main_collection = bpy.data.collections[main_collection_name]
-            for obj in main_collection.objects:
-                bpy.data.objects.remove(obj, do_unlink=True)
-        else:
-            main_collection = bpy.data.collections.new(main_collection_name)
-            bpy.context.scene.collection.children.link(main_collection)
-
-        total_intervals = 0
-        lithology_collections = {}
-
-        # Build name-to-ID mapping
-        collar_id_by_name = {}
-        for collar in collars:
-            hole_id = collar.get('id')
-            hole_name = collar.get('name', collar.get('hole_id', f"Hole_{hole_id}"))
-            collar_id_by_name[hole_name] = hole_id
-
-        # Process each hole
-        for hole_name, hole_lithologies in lithology_data.items():
-            if not hole_lithologies:
-                continue
-
-            hole_id = collar_id_by_name.get(hole_name)
-            if not hole_id:
-                continue
-
-            trace_summary = traces_by_hole.get(hole_id)
-            if not trace_summary:
-                continue
-
-            trace_id = trace_summary.get('id')
-            success, trace_detail = GeoDBData.get_drill_trace_detail(trace_id)
-            if not success:
-                continue
-
-            trace_data = trace_detail.get('trace_data', {})
-            trace_depths = trace_data.get('depths', [])
-            trace_coords = trace_data.get('coords', [])
-
-            if not trace_depths or not trace_coords:
-                continue
-
-            # Create tubes for intervals
-            for lith_interval in hole_lithologies:
-                depth_from = lith_interval.get('depth_from')
-                depth_to = lith_interval.get('depth_to')
-
-                if depth_from is None or depth_to is None:
-                    continue
-
-                lithology = lith_interval.get('lithology', {})
-                if isinstance(lithology, dict):
-                    lith_name = lithology.get('name', 'Unknown')
-                    lith_color = lithology.get('color', '#CCCCCC')
-                    print(f"DEBUG: Lithology={lith_name}, Color={lith_color}, Full dict={lithology}")
-                elif isinstance(lithology, str):
-                    lith_name = lithology
-                    lith_color = '#CCCCCC'
-                    print(f"DEBUG: Lithology string={lith_name}, using default color")
-                else:
-                    lith_name = 'Unknown'
-                    lith_color = '#CCCCCC'
-                    print(f"DEBUG: Unknown lithology type={type(lithology)}")
-
-                if lith_name not in lithology_collections:
-                    lith_collection = bpy.data.collections.new(lith_name)
-                    main_collection.children.link(lith_collection)
-                    lithology_collections[lith_name] = lith_collection
-                else:
-                    lith_collection = lithology_collections[lith_name]
-
-                # Get diameter override for this lithology type
-                override_key = f"set_{selected_set_id}_lith_{lith_name}"
-                tube_radius = diameter_overrides.get(override_key, self.tube_radius)
-
-                tube_name = f"{hole_name}_{lith_name}_{depth_from}_{depth_to}"
-                tube_obj = create_interval_tube(
-                    trace_depths=trace_depths,
-                    trace_coords=trace_coords,
-                    depth_from=depth_from,
-                    depth_to=depth_to,
-                    radius=tube_radius,
-                    resolution=self.tube_resolution,
-                    name=tube_name
-                )
-
-                if tube_obj:
-                    lith_collection.objects.link(tube_obj)
-
-                    # Use API color instead of hash-based color
-                    color = hex_to_rgba(lith_color)
-                    print(f"DEBUG: Applying color {color} (from hex {lith_color}) to tube {tube_name}")
-                    print(f"DEBUG: BEFORE apply_material_to_interval - tube_obj={tube_obj}, tube_obj.data={tube_obj.data if tube_obj else 'N/A'}")
-                    apply_material_to_interval(tube_obj, color)
-                    print(f"DEBUG: AFTER apply_material_to_interval - completed successfully")
-
-                    interval_props = {
-                        "bhid": hole_id,
-                        "hole_name": hole_name,
-                        "depth_from": depth_from,
-                        "depth_to": depth_to,
-                        "lithology": lith_name,
-                        "lithology_set": set_name,
-                        "notes": lith_interval.get('notes', ''),
-                    }
-
-                    GeoDBObjectProperties.tag_drill_sample(tube_obj, interval_props)
-
-                    tube_obj['geodb_visualization'] = True
-                    tube_obj['geodb_type'] = 'lithology_interval'
-                    tube_obj['geodb_hole_name'] = hole_name
-                    tube_obj['geodb_lithology'] = lith_name
-
-                    total_intervals += 1
-
-        self.report({'INFO'}, f"Created {total_intervals} lithology intervals in {len(lithology_collections)} types")
-        return {'FINISHED'}
-
-
-# DEPRECATED: This operator is not currently used. The active alteration visualization
-# operator is in interval_visualization_panel.py. This code is kept for reference only.
-class GEODB_OT_VisualizeAlteration(Operator):
-    """DEPRECATED - Visualize alteration intervals as curved tubes (use interval_visualization_panel.py instead)"""
-    bl_idname = "geodb.visualize_alteration_deprecated"
-    bl_label = "Visualize Alteration (Deprecated)"
-    bl_description = "DEPRECATED - Use the operator in interval_visualization_panel.py instead"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    set_selection: EnumProperty(
-        name="Alteration Set",
-        description="Select alteration set to visualize",
-        items=get_alteration_sets_enum
-    )
-
-    tube_radius: FloatProperty(
-        name="Tube Radius",
-        description="Radius of the alteration tubes",
-        default=0.12,
-        min=0.01,
-        max=2.0
-    )
-
-    tube_resolution: IntProperty(
-        name="Resolution",
-        description="Number of vertices around tube circumference",
-        default=8,
-        min=3,
-        max=32
-    )
-
-    def execute(self, context):
-        scene = context.scene
-        props = scene.geodb
-
-        if not hasattr(props, 'selected_project_id') or not props.selected_project_id:
-            self.report({'ERROR'}, "No project selected")
-            return {'CANCELLED'}
-
-        project_id = int(props.selected_project_id)
-        selected_set_id = int(self.set_selection)
-
-        if selected_set_id > 0:
-            use_set_id = selected_set_id
-            set_name = f"set_{selected_set_id}"
-
-            success, alt_sets = GeoDBData.get_alteration_sets(project_id)
-            if success and alt_sets:
-                for alt_set in alt_sets:
-                    if alt_set.get('id') == selected_set_id:
-                        set_name = alt_set.get('name', set_name)
-                        break
-        else:
-            set_name = 'all'
-            use_set_id = None
-
-        # Fetch data
-        success, collars = GeoDBData.get_drill_holes(project_id)
-        if not success or not collars:
-            self.report({'ERROR'}, "Failed to fetch drill collars")
-            return {'CANCELLED'}
-
-        success, alteration_data = GeoDBData.get_alterations_for_project(project_id, use_set_id)
-        if not success or not alteration_data:
-            self.report({'ERROR'}, "Failed to fetch alteration data")
-            return {'CANCELLED'}
-
-        success, traces_by_hole = GeoDBData.get_drill_traces(project_id)
-        if not success:
-            self.report({'ERROR'}, "Failed to fetch drill traces")
-            return {'CANCELLED'}
-
-        # Create main collection
-        main_collection_name = f"alteration_{set_name}"
-        if main_collection_name in bpy.data.collections:
-            main_collection = bpy.data.collections[main_collection_name]
-            for obj in main_collection.objects:
-                bpy.data.objects.remove(obj, do_unlink=True)
-        else:
-            main_collection = bpy.data.collections.new(main_collection_name)
-            bpy.context.scene.collection.children.link(main_collection)
-
-        total_intervals = 0
-        alteration_collections = {}
-
-        # Build name-to-ID mapping
-        collar_id_by_name = {}
-        for collar in collars:
-            hole_id = collar.get('id')
-            hole_name = collar.get('name', collar.get('hole_id', f"Hole_{hole_id}"))
-            collar_id_by_name[hole_name] = hole_id
-
-        # Process each hole
-        for hole_name, hole_alterations in alteration_data.items():
-            if not hole_alterations:
-                continue
-
-            hole_id = collar_id_by_name.get(hole_name)
-            if not hole_id:
-                continue
-
-            trace_summary = traces_by_hole.get(hole_id)
-            if not trace_summary:
-                continue
-
-            trace_id = trace_summary.get('id')
-            success, trace_detail = GeoDBData.get_drill_trace_detail(trace_id)
-            if not success:
-                continue
-
-            trace_data = trace_detail.get('trace_data', {})
-            trace_depths = trace_data.get('depths', [])
-            trace_coords = trace_data.get('coords', [])
-
-            if not trace_depths or not trace_coords:
-                continue
-
-            # Create tubes for intervals
-            for alt_interval in hole_alterations:
-                depth_from = alt_interval.get('depth_from')
-                depth_to = alt_interval.get('depth_to')
-
-                if depth_from is None or depth_to is None:
-                    continue
-
-                alteration = alt_interval.get('alteration', {})
-                if isinstance(alteration, dict):
-                    alt_name = alteration.get('name', 'Unknown')
-                elif isinstance(alteration, str):
-                    alt_name = alteration
-                else:
-                    alt_name = 'Unknown'
-
-                if alt_name not in alteration_collections:
-                    alt_collection = bpy.data.collections.new(alt_name)
-                    main_collection.children.link(alt_collection)
-                    alteration_collections[alt_name] = alt_collection
-                else:
-                    alt_collection = alteration_collections[alt_name]
-
-                tube_name = f"{hole_name}_{alt_name}_{depth_from}_{depth_to}"
-                tube_obj = create_interval_tube(
-                    trace_depths=trace_depths,
-                    trace_coords=trace_coords,
-                    depth_from=depth_from,
-                    depth_to=depth_to,
-                    radius=self.tube_radius,
-                    resolution=self.tube_resolution,
-                    name=tube_name
-                )
-
-                if tube_obj:
-                    alt_collection.objects.link(tube_obj)
-
-                    color = get_color_for_alteration(alt_name)
-                    apply_material_to_interval(tube_obj, color)
-
-                    interval_props = {
-                        "bhid": hole_id,
-                        "hole_name": hole_name,
-                        "depth_from": depth_from,
-                        "depth_to": depth_to,
-                        "alteration": alt_name,
-                        "alteration_set": set_name,
-                        "notes": alt_interval.get('notes', ''),
-                    }
-
-                    GeoDBObjectProperties.tag_drill_sample(tube_obj, interval_props)
-
-                    tube_obj['geodb_visualization'] = True
-                    tube_obj['geodb_type'] = 'alteration_interval'
-                    tube_obj['geodb_hole_name'] = hole_name
-                    tube_obj['geodb_alteration'] = alt_name
-
-                    total_intervals += 1
-
-        self.report({'INFO'}, f"Created {total_intervals} alteration intervals in {len(alteration_collections)} types")
-        return {'FINISHED'}
-
-
-# DEPRECATED: Clear Visualizations Operator
-# Commented out - not currently needed
-# class GEODB_OT_ClearVisualizations(Operator):
-#     """Clear all drill visualizations"""
-#     bl_idname = "geodb.clear_visualizations"
-#     bl_label = "Clear All"
-#     bl_description = "Remove all drill hole visualizations from the scene"
-#
-#     def execute(self, context):
-#         # Remove all geodb visualization objects
-#         removed = 0
-#         for obj in list(bpy.data.objects):
-#             if 'geodb_visualization' in obj:
-#                 bpy.data.objects.remove(obj, do_unlink=True)
-#                 removed += 1
-#
-#         self.report({'INFO'}, f"Removed {removed} visualization objects")
-#         return {'FINISHED'}
 
 
 # ============================================================================
@@ -1793,6 +1438,11 @@ class GEODB_PT_DrillVisualizationPanel(Panel):
         if not geodb.selected_project_id:
             layout.label(text="Please select a project first", icon='ERROR')
             return
+
+        # View settings
+        row = layout.row()
+        row.prop(geodb, "auto_adjust_view", text="Auto-adjust view on import")
+        layout.separator()
 
         # Show progress bar if operation is running
         if geodb.import_active:
@@ -1891,18 +1541,31 @@ class GEODB_PT_DrillVisualizationPanel(Panel):
         box = layout.box()
         box.label(text="Terrain Visualization", icon='MESH_GRID')
 
-        # Resolution selector
+        # Import terrain button with options
         row = box.row()
-        row.label(text="Resolution:")
-        row = box.row(align=True)
-        op = row.operator("geodb.import_terrain", text="Very Low (Fast)")
-        op.resolution = 'very_low'
-        op = row.operator("geodb.import_terrain", text="Low")
-        op.resolution = 'low'
-        op = row.operator("geodb.import_terrain", text="Medium")
-        op.resolution = 'medium'
+        row.operator("geodb.import_terrain", text="Import Terrain", icon='IMPORT')
 
-        box.label(text="Downloads DEM mesh with satellite texture", icon='INFO')
+        box.label(text="Import DEM mesh with texture overlay", icon='INFO')
+
+        # Check if terrain mesh is selected - show texture switching option
+        obj = context.active_object
+        if obj and obj.get('geodb_terrain_resolution'):
+            box.separator()
+            col = box.column(align=True)
+            col.label(text="Selected Terrain:", icon='MESH_PLANE')
+            col.label(text=f"  {obj.name}")
+
+            # Show current texture
+            current_texture = obj.get('geodb_active_texture', 'unknown')
+            col.label(text=f"  Texture: {current_texture.title()}")
+
+            # Show available textures
+            has_satellite = obj.get('geodb_satellite_texture_url') is not None
+            has_topo = obj.get('geodb_topo_texture_url') is not None
+
+            if has_satellite or has_topo:
+                row = col.row()
+                row.operator("geodb.switch_terrain_texture", text="Change Texture", icon='TEXTURE')
 
         # # Actions
         # box = layout.box()
@@ -1920,9 +1583,6 @@ classes = (
     GEODB_OT_LoadAlterationConfig,
     GEODB_OT_LoadMineralizationConfig,
     GEODB_OT_VisualizeAssays,
-    # GEODB_OT_VisualizeLithology,  # DEPRECATED - Registered in interval_visualization_panel.py instead
-    # GEODB_OT_VisualizeAlteration,  # DEPRECATED - Registered in interval_visualization_panel.py instead
-    # GEODB_OT_ClearVisualizations,  # DEPRECATED - Not currently needed
     GEODB_PT_DrillVisualizationPanel,
 )
 

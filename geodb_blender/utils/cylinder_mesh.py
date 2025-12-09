@@ -175,7 +175,8 @@ def create_sample_cylinder_mesh(xyz_from: Tuple[float, float, float],
                     if key == 'all_elements':
                         # Store each element as separate properties
                         for elem_key, elem_val in value.items():
-                            # elem_val is a dict like: {"element": "Ag", "value": 1.8, "units": "ppm", "method_name": "AQ202", ...}
+                            # elem_val is a dict like: {"value": 1.8, "units": "ppm", "method_name": "AQ202", ...}
+                            # The element symbol is already encoded in elem_key (e.g., "element_Ag")
                             # Store each field as a separate property
                             if isinstance(elem_val, dict):
                                 for field_name, field_value in elem_val.items():

@@ -13,6 +13,23 @@ from pathlib import Path
 import bpy
 from bpy.props import StringProperty, BoolProperty, PointerProperty, EnumProperty, IntProperty, FloatProperty
 from bpy.types import PropertyGroup, AddonPreferences
+from bpy.app.handlers import persistent
+
+
+def is_dev_mode_enabled():
+    """Check if development mode is enabled.
+
+    Development mode is enabled when a file called 'dev_mode.md' exists
+    in the add-on's root directory. This file is gitignored, so it will
+    only be present in development environments.
+
+    Returns:
+        bool: True if dev_mode.md exists, False otherwise.
+    """
+    addon_dir = Path(__file__).parent.parent
+    dev_mode_file = addon_dir / "dev_mode.md"
+    return dev_mode_file.exists()
+
 
 bl_info = {
     "name": "geoDB Integration",
@@ -38,80 +55,63 @@ modules = [
 # Ensure dependencies are installed
 def ensure_dependencies():
     """Ensure that all required dependencies are installed."""
-    # Get the addon's directory
-    addon_dir = Path(__file__).parent
-    libs_dir = addon_dir / "libs"
-    
-    # Add libs directory to path if it exists
-    if libs_dir.exists() and str(libs_dir) not in sys.path:
-        sys.path.insert(0, str(libs_dir))
-        print(f"geoDB Add-on: Added {libs_dir} to sys.path")
-    
-    # Also try user site-packages as fallback
+    # Add user site-packages to path if not already present
     import site
     user_site = site.getusersitepackages()
     if user_site and user_site not in sys.path:
         sys.path.insert(0, user_site)
         print(f"geoDB Add-on: Added {user_site} to sys.path")
-    
+
     # Try to import dependencies
     try:
         import requests
         import cryptography
         import numpy
+        import scipy
+        import skimage
         print("geoDB Add-on: All dependencies are available")
         return True
     except ImportError as e:
         print(f"geoDB Add-on: Missing dependency: {e}")
-    
+
     # If we get here, dependencies are missing - try to install them
     print("geoDB Add-on: Attempting to install missing dependencies...")
-    print(f"geoDB Add-on: Installing to {libs_dir}")
-    
-    # Create libs directory if it doesn't exist
-    libs_dir.mkdir(exist_ok=True)
-    
+
     # Get Python executable
     python_exe = sys.executable
-    
+
     # Install dependencies
     try:
         import subprocess
-        
-        # Install required packages to the libs directory
-        packages = ["requests", "cryptography", "numpy"]
+
+        # Install required packages directly to Blender's Python
+        packages = ["requests", "cryptography", "numpy", "scipy", "scikit-image"]
         for package in packages:
-            print(f"Installing {package} to addon directory...")
+            print(f"Installing {package}...")
             subprocess.check_call([
-                python_exe, "-m", "pip", "install", 
-                "--target", str(libs_dir),
-                "--upgrade", package
+                python_exe, "-m", "pip", "install", package
             ])
-        
+
         print("geoDB Add-on: Dependencies installed successfully")
-        
-        # Add libs directory to path
-        if str(libs_dir) not in sys.path:
-            sys.path.insert(0, str(libs_dir))
-        
+
         # Force reload of site-packages to pick up newly installed modules
         import importlib
         importlib.invalidate_caches()
-        
+
         # Verify installation
         try:
             import requests
             import cryptography
             import numpy
+            import scipy
+            import skimage
             print("geoDB Add-on: Dependencies verified and ready to use")
             return True
         except ImportError as e:
             print(f"geoDB Add-on: Dependencies installed but import still failed: {e}")
-            print(f"geoDB Add-on: libs_dir: {libs_dir}")
-            print(f"geoDB Add-on: sys.path[0]: {sys.path[0]}")
             print("Please restart Blender to complete the installation.")
             return False
-            
+
     except Exception as e:
         print(f"geoDB Add-on: Failed to install dependencies: {e}")
         import traceback
@@ -125,6 +125,46 @@ def check_scipy():
         return True
     except ImportError:
         return False
+
+
+@persistent
+def validate_auth_on_load(dummy):
+    """Validate authentication state when a .blend file is loaded.
+
+    This handler ensures that the UI login state matches the actual
+    API authentication state. When a file is loaded, the is_logged_in
+    property may be True (from saved state), but the API client won't
+    have a valid token in memory.
+    """
+    try:
+        # Import here to avoid circular imports during addon registration
+        from .api.auth import get_api_client
+
+        scene = bpy.context.scene
+        if not hasattr(scene, 'geodb'):
+            return
+
+        # If the scene says we're logged in, verify actual auth state
+        if scene.geodb.is_logged_in:
+            client = get_api_client()
+
+            # Check if the client actually has a token in memory
+            if not client.is_authenticated():
+                # Token is not in memory - check if there's a saved token to unlock
+                if client.has_saved_token():
+                    # There's a saved token - user needs to unlock it
+                    # Reset the login state so the UI shows the unlock option
+                    scene.geodb.is_logged_in = False
+                    print("geoDB: Session expired. Please unlock your saved token to continue.")
+                else:
+                    # No saved token available - user needs to log in again
+                    scene.geodb.is_logged_in = False
+                    scene.geodb.username = ""
+                    print("geoDB: Session expired. Please log in again.")
+    except Exception as e:
+        # Don't break file loading if there's an error
+        print(f"geoDB: Error validating auth state: {e}")
+
 
 # Scene properties
 class GeoDBProperties(PropertyGroup):
@@ -197,7 +237,13 @@ class GeoDBProperties(PropertyGroup):
         description="Show sample intervals in the 3D view",
         default=True,
     )
-    
+
+    auto_adjust_view: BoolProperty(
+        name="Auto-Adjust View on Import",
+        description="Automatically set orthographic view, increase clip distance, and frame imported data",
+        default=True,
+    )
+
     selected_assay_element: StringProperty(
         name="Selected Element",
         description="Element to use for sample coloring",
@@ -303,63 +349,7 @@ class GeoDBProperties(PropertyGroup):
     )
     
     # ========================================================================
-    # DEPRECATED: Bulk Import Properties (Not Currently Used)
-    # ========================================================================
-    # TODO: Remove these if bulk import feature is never implemented
-    # or implement bulk import operator if needed
-
-    # validation_results: StringProperty(
-    #     name="Validation Results",
-    #     description="Validation results from bulk validation operation",
-    #     default="",
-    # )
-
-    # validation_log_path: StringProperty(
-    #     name="Validation Log",
-    #     description="Path to save drill hole validation report",
-    #     default="",
-    #     subtype='FILE_PATH',
-    # )
-
-    # bulk_import_mode: EnumProperty(
-    #     name="Import Mode",
-    #     description="Choose which drill holes to import",
-    #     items=[
-    #         ('ALL', "All Holes", "Import all drill holes in the project"),
-    #         ('VALID_ONLY', "Valid Only", "Import only holes that pass validation"),
-    #         ('RANGE', "Range", "Import a range of holes by index"),
-    #     ],
-    #     default='ALL',
-    # )
-
-    # bulk_start_index: IntProperty(
-    #     name="Start Index",
-    #     description="Start index for range import (0-based)",
-    #     default=0,
-    #     min=0,
-    # )
-
-    # bulk_end_index: IntProperty(
-    #     name="End Index",
-    #     description="End index for range import (0-based, inclusive)",
-    #     default=10,
-    #     min=0,
-    # )
-
-    # bulk_skip_on_error: BoolProperty(
-    #     name="Skip on Error",
-    #     description="Skip drill holes that have errors and continue with others",
-    #     default=True,
-    # )
-
-    # bulk_create_straight_holes: BoolProperty(
-    #     name="Create Straight Holes",
-    #     description="Create straight holes for collars without survey data",
-    #     default=True,
-    # )
-    
-    # ========================================================================
-    # NEW: Drill Visualization Workflow Properties
+    # Drill Visualization Workflow Properties
     # ========================================================================
     
     drill_viz_data_imported: BoolProperty(
@@ -434,6 +424,79 @@ class GeoDBProperties(PropertyGroup):
         default="",
     )
 
+    # ========================================================================
+    # Drillhole Planning Properties
+    # ========================================================================
+
+    planning_selected_pad_id: IntProperty(
+        name="Selected Pad ID",
+        description="ID of the selected drill pad for planning",
+        default=-1,
+    )
+
+    planning_selected_pad_name: StringProperty(
+        name="Selected Pad",
+        description="Name of the selected drill pad",
+        default="",
+    )
+
+    planning_hole_name: StringProperty(
+        name="Hole Name",
+        description="Name for the planned drill hole (e.g., PLN-001)",
+        default="PLN-001",
+    )
+
+    planning_azimuth: FloatProperty(
+        name="Azimuth",
+        description="Drill hole azimuth (0-360 degrees, 0=North)",
+        default=0.0,
+        min=0.0,
+        max=360.0,
+        precision=1,
+    )
+
+    planning_dip: FloatProperty(
+        name="Dip",
+        description="Drill hole dip (-90 to 0 degrees, -90=vertical down)",
+        default=-60.0,
+        min=-90.0,
+        max=0.0,
+        precision=1,
+    )
+
+    planning_length: FloatProperty(
+        name="Length",
+        description="Planned hole length in meters",
+        default=200.0,
+        min=1.0,
+        max=2000.0,
+        precision=1,
+    )
+
+    planning_hole_type: EnumProperty(
+        name="Hole Type",
+        description="Type of drill hole",
+        items=[
+            ('DD', 'Diamond', 'Diamond core drilling'),
+            ('RC', 'Reverse Circulation', 'RC drilling'),
+            ('RAB', 'Rotary Air Blast', 'RAB drilling'),
+        ],
+        default='DD',
+    )
+
+    planning_collar_elevation: FloatProperty(
+        name="Collar Elevation",
+        description="Manual collar elevation override (meters). Set to 0 to use pad data.",
+        default=0.0,
+        precision=1,
+    )
+
+    planning_use_manual_elevation: BoolProperty(
+        name="Use Manual Elevation",
+        description="Override the pad elevation with a manual value",
+        default=False,
+    )
+
 # Add-on preferences
 class GeoDBPreferences(AddonPreferences):
     """Preferences for the geoDB add-on."""
@@ -448,34 +511,35 @@ class GeoDBPreferences(AddonPreferences):
     
     def draw(self, context):
         layout = self.layout
-        
-        # Server settings
-        box = layout.box()
-        box.label(text="Server Settings")
-        box.prop(self, "use_dev_server")
-        
-        if self.use_dev_server:
-            box.label(text="Using development server: http://localhost:8000/api/v1/", icon='INFO')
-        else:
-            box.label(text="Using production server: https://geodb.io/api/v1/", icon='WORLD')
-        
+
+        # Server settings (only shown in development mode)
+        if is_dev_mode_enabled():
+            box = layout.box()
+            box.label(text="Server Settings (Dev Mode)", icon='CONSOLE')
+            box.prop(self, "use_dev_server")
+
+            if self.use_dev_server:
+                box.label(text="Using development server: http://localhost:8000/api/v1/", icon='INFO')
+            else:
+                box.label(text="Using production server: https://geodb.io/api/v1/", icon='WORLD')
+
         # Dependencies
         box = layout.box()
         box.label(text="Dependencies")
-        
-        # Check if dependencies are installed
-        if ensure_dependencies():
-            box.label(text="Required dependencies are installed", icon='CHECKMARK')
+
+        # Check if all dependencies (including scipy) are installed
+        deps_ok = ensure_dependencies()
+        scipy_ok = check_scipy()
+
+        if deps_ok and scipy_ok:
+            box.label(text="All dependencies installed", icon='CHECKMARK')
+            box.label(text="RBF interpolation available", icon='CHECKMARK')
         else:
-            box.label(text="Some required dependencies are missing", icon='ERROR')
-            box.operator("geodb.install_dependencies", icon='PACKAGE')
-        
-        # Check scipy (optional)
-        if check_scipy():
-            box.label(text="scipy: Installed (RBF interpolation available)", icon='CHECKMARK')
-        else:
-            box.label(text="scipy: Not installed (RBF interpolation disabled)", icon='INFO')
-            box.label(text="Install scipy for RBF interpolation support")
+            if not deps_ok:
+                box.label(text="Some required dependencies are missing", icon='ERROR')
+            if not scipy_ok:
+                box.label(text="scipy: Not installed (RBF interpolation disabled)", icon='X')
+            box.operator("geodb.install_dependencies", text="Install All Dependencies", icon='PACKAGE')
 
 # Operator to install dependencies
 class GEODB_OT_InstallDependencies(bpy.types.Operator):
@@ -531,7 +595,15 @@ def register():
         # Don't fail completely - user can still access preferences to install deps
         return
 
+    # Register load_post handler to validate auth state when files are opened
+    if validate_auth_on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(validate_auth_on_load)
+
 def unregister():
+    # Unregister load_post handler
+    if validate_auth_on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(validate_auth_on_load)
+
     # Unregister modules in reverse order
     try:
         for module_name in reversed(modules):

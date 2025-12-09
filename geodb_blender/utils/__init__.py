@@ -6,12 +6,9 @@ including data conversion, file handling, and other helper functions.
 """
 
 import bpy
-from . import desurvey
 
 # Export utility functions and classes
 from .desurvey import (
-    desurvey_minimum_curvature,
-    DrillholeDesurvey,
     create_drill_trace_mesh,
     create_drill_sample_meshes,
 )
@@ -22,8 +19,6 @@ from .object_properties import (
 )
 
 __all__ = [
-    'desurvey_minimum_curvature',
-    'DrillholeDesurvey',
     'create_drill_trace_mesh',
     'create_drill_sample_meshes',
     'GeoDBObjectProperties',

@@ -10,6 +10,7 @@ from bpy.props import StringProperty, BoolProperty
 from bpy.types import Operator, Panel
 
 from .client import GeoDBAPIClient
+from .. import is_dev_mode_enabled
 
 # Global API client instance
 api_client = None
@@ -294,24 +295,25 @@ class GEODB_PT_Authentication(Panel):
     def draw(self, context):
         layout = self.layout
         scene = context.scene
-        
-        # Show server status
-        preferences = context.preferences.addons.get("geodb_blender")
-        if preferences:
-            box = layout.box()
-            if preferences.preferences.use_dev_server:
-                box.label(text="Server: Local Development", icon='CONSOLE')
-                box.label(text="http://localhost:8000/api/v1/")
-            else:
-                box.label(text="Server: Production", icon='WORLD')
-                box.label(text="https://geodb.io/api/v1/")
-            
-            # Show reset button to apply server changes
-            global api_client
-            if api_client is not None:
-                box.operator("geodb.reset_api_client", text="Switch Server", icon='FILE_REFRESH')
-        
-        layout.separator()
+
+        # Show server status (only in development mode)
+        if is_dev_mode_enabled():
+            preferences = context.preferences.addons.get("geodb_blender")
+            if preferences:
+                box = layout.box()
+                if preferences.preferences.use_dev_server:
+                    box.label(text="Server: Local Development", icon='CONSOLE')
+                    box.label(text="http://localhost:8000/api/v1/")
+                else:
+                    box.label(text="Server: Production", icon='WORLD')
+                    box.label(text="https://geodb.io/api/v1/")
+
+                # Show reset button to apply server changes
+                global api_client
+                if api_client is not None:
+                    box.operator("geodb.reset_api_client", text="Switch Server", icon='FILE_REFRESH')
+
+            layout.separator()
         
         # Check if user is logged in
         if scene.geodb.is_logged_in:

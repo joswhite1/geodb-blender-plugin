@@ -48,7 +48,23 @@ def register():
     from .interval_visualization_panel import register as register_interval_viz
     register_interval_viz()
 
+    # Register ellipsoid editor panel
+    from .ellipsoid_editor_panel import register as register_ellipsoid_editor
+    register_ellipsoid_editor()
+
+    # Register drillhole planning panel
+    from .drillhole_planning_panel import register as register_drillhole_planning
+    register_drillhole_planning()
+
 def unregister():
+    # Unregister drillhole planning panel
+    from .drillhole_planning_panel import unregister as unregister_drillhole_planning
+    unregister_drillhole_planning()
+
+    # Unregister ellipsoid editor panel
+    from .ellipsoid_editor_panel import unregister as unregister_ellipsoid_editor
+    unregister_ellipsoid_editor()
+
     # Unregister interval visualization panel
     from .interval_visualization_panel import unregister as unregister_interval_viz
     unregister_interval_viz()

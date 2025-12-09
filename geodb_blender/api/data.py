@@ -1364,7 +1364,9 @@ class GeoDBData:
         print(f"Step 3: Downloading mesh data from CDN...")
 
         try:
-            response = requests.get(mesh_url, headers=client.headers, timeout=60)
+            # The mesh URL is a pre-signed CDN URL that includes authentication
+            # in query parameters, so no additional headers are needed
+            response = requests.get(mesh_url, timeout=60)
             response.raise_for_status()
             mesh_data = response.json()
         except Exception as e:
@@ -1372,10 +1374,21 @@ class GeoDBData:
             print(f"ERROR: {error_msg}")
             return False, {'error': error_msg}
 
+        # Normalize field names - server may use 'vertices' instead of 'positions'
+        if 'vertices' in mesh_data and 'positions' not in mesh_data:
+            mesh_data['positions'] = mesh_data['vertices']
+            print("Note: Normalized 'vertices' to 'positions'")
+
         # Validate mesh structure
         required_fields = ['positions', 'indices']
         missing_fields = [f for f in required_fields if f not in mesh_data]
         if missing_fields:
+            # Debug: Show what fields ARE present in the mesh data
+            print(f"DEBUG: Mesh data keys received: {list(mesh_data.keys())}")
+            if len(str(mesh_data)) < 500:
+                print(f"DEBUG: Full mesh data: {mesh_data}")
+            else:
+                print(f"DEBUG: Mesh data sample (first 500 chars): {str(mesh_data)[:500]}")
             error_msg = f"Invalid mesh data: missing {missing_fields}"
             print(f"ERROR: {error_msg}")
             return False, {'error': error_msg}
@@ -1402,3 +1415,176 @@ class GeoDBData:
             print(f"  Topo Texture Available: Yes")
 
         return True, mesh_data
+
+    @staticmethod
+    def get_terrain_textures(project_code: str, resolution: str = 'low') -> Tuple[bool, Dict[str, Any]]:
+        """
+        Get available terrain textures from the elevation API.
+
+        This method calls the elevation/latest endpoint which returns texture URLs
+        for satellite imagery, topographic maps, and any custom textures.
+
+        Args:
+            project_code: The project code (e.g., 'ECBSDT5')
+            resolution: Mesh resolution for the request (not currently used for textures)
+
+        Returns:
+            Tuple[bool, Dict]: Success flag and textures dict with:
+                - satellite: URL or None
+                - topo: URL or None
+                - available_textures: [
+                    {'id': int, 'name': str, 'type': str, 'url': str, 'display_order': int},
+                    ...
+                  ]
+        """
+        print(f"\n=== Fetching Terrain Textures for Project Code: {project_code} ===")
+
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {'error': 'Not authenticated'}
+
+        # Use the elevation/latest endpoint which supports token auth
+        elevation_endpoint = f'projects/{project_code}/elevation/latest/'
+        print(f"Requesting elevation endpoint: {elevation_endpoint}")
+
+        success, elevation_data = client.make_request('GET', elevation_endpoint)
+
+        if not success:
+            error_msg = elevation_data.get('error', 'No elevation data available') if isinstance(elevation_data, dict) else str(elevation_data)
+            print(f"ERROR: Failed to fetch elevation data: {error_msg}")
+            return False, {'error': error_msg}
+
+        # Extract texture URLs from elevation data
+        satellite_url = elevation_data.get('satellite_imagery_url')
+        topo_url = elevation_data.get('topo_imagery_url')
+
+        # Build available_textures list from the response
+        available_textures = []
+
+        if satellite_url:
+            available_textures.append({
+                'id': 1,
+                'name': 'Satellite Imagery',
+                'type': 'satellite',
+                'url': satellite_url,
+                'display_order': 1
+            })
+
+        if topo_url:
+            available_textures.append({
+                'id': 2,
+                'name': 'Topographic Map',
+                'type': 'topo',
+                'url': topo_url,
+                'display_order': 2
+            })
+
+        # Check for additional textures in the response
+        if 'textures' in elevation_data:
+            textures_data = elevation_data.get('textures', {})
+            extra_textures = textures_data.get('available_textures', [])
+            for tex in extra_textures:
+                if tex.get('type') not in ['satellite', 'topo']:
+                    available_textures.append(tex)
+
+        print(f"SUCCESS: Found {len(available_textures)} available textures")
+        for tex in available_textures:
+            print(f"  - {tex.get('name', 'Unknown')} ({tex.get('type', 'unknown')})")
+
+        return True, {
+            'satellite': satellite_url,
+            'topo': topo_url,
+            'available_textures': available_textures
+        }
+
+    @staticmethod
+    def get_drill_pads_blender(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Get drill pads with local grid coordinates for Blender visualization.
+
+        Uses: GET /api/v1/drill-pads/blender/
+
+        Args:
+            project_id: The ID of the project
+
+        Returns:
+            Tuple[bool, List[Dict]]: Success flag and list of drill pads with:
+                - id: Pad ID
+                - name: Pad name
+                - elevation: Pad elevation (meters)
+                - local_grid.vertices_2d: [[x, y], ...] polygon vertices
+                - local_grid.centroid: [x, y, z] center point
+                - location: GeoJSON Point (WGS84)
+                - polygon: GeoJSON Polygon (WGS84)
+        """
+        print(f"\n=== Fetching Drill Pads (Blender) for Project ID: {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, []
+
+        endpoint = 'drill-pads/blender/'
+        params = {'project_id': project_id, 'page_size': 1000}
+        print(f"Requesting endpoint: {endpoint} with params: {params}")
+        success, data = client.make_request('GET', endpoint, params=params)
+
+        if not success:
+            print(f"ERROR: Failed to fetch drill pads. Response: {data}")
+            return False, []
+
+        # Extract pads from response
+        pads = []
+        if isinstance(data, dict) and 'results' in data:
+            pads = data['results']
+        elif isinstance(data, list):
+            pads = data
+
+        print(f"Retrieved {len(pads)} drill pads")
+        for pad in pads[:3]:  # Show first 3 for debugging
+            name = pad.get('name', 'Unknown')
+            elevation = pad.get('elevation', 0)
+            local_grid = pad.get('local_grid', {})
+            vertices = local_grid.get('vertices_2d', [])
+            print(f"  - {name}: elevation={elevation}m, vertices={len(vertices)}")
+
+        return True, pads
+
+    @staticmethod
+    def create_planned_drill_hole(hole_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        """Create a planned drill hole via the API.
+
+        Uses: POST /api/v1/drill-collars/
+
+        Args:
+            hole_data: Dictionary with:
+                - name: Hole ID (e.g., "PLN-001")
+                - project: {"name": "...", "company": "..."} (natural key)
+                - pad: {"name": "...", "project": {...}} (natural key)
+                - hole_status: "PL" (Planned)
+                - hole_type: "DD", "RC", etc.
+                - total_depth: Length in meters
+                - azimuth: 0-360 degrees
+                - dip: -90 to 90 degrees
+
+        Returns:
+            Tuple[bool, Dict]: Success flag and created collar data or error message
+        """
+        print(f"\n=== Creating Planned Drill Hole ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {'error': 'Not authenticated'}
+
+        endpoint = 'drill-collars/'
+        print(f"POST to endpoint: {endpoint}")
+        print(f"Hole data: {hole_data}")
+
+        success, data = client.make_request('POST', endpoint, data=hole_data)
+
+        if not success:
+            error_msg = data.get('error', str(data)) if isinstance(data, dict) else str(data)
+            print(f"ERROR: Failed to create drill hole. Response: {error_msg}")
+            return False, {'error': error_msg}
+
+        print(f"SUCCESS: Created drill hole: {data.get('name', 'Unknown')}")
+        return True, data
