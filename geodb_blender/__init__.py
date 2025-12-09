@@ -38,7 +38,6 @@ bl_info = {
     "blender": (3, 0, 0),
     "version": (0, 1, 0),
     "location": "View3D > Sidebar > geoDB",
-    "warning": "Development Version",
     "category": "3D View",
     "doc_url": "https://geodb.io/docs/blender-addon",
 }

@@ -1,0 +1,52 @@
+schema_version = "1.0.0"
+
+id = "geodb_integration"
+name = "geoDB Integration"
+version = "0.1.0"
+tagline = "Visualize and analyze geological data from geoDB"
+maintainer = "Aqua Terra Geoscientists <support@geodb.io>"
+type = "add-on"
+
+# Blender version support
+blender_version_min = "4.2.0"
+
+# License (SPDX identifier)
+license = ["SPDX:GPL-2.0-or-later"]
+
+# Website
+website = "https://geodb.io/docs/blender-addon"
+
+# Category for the add-on
+tags = ["3D View", "Import-Export", "Mesh"]
+
+# Permissions needed by the add-on
+[permissions]
+network = "Connect to geoDB API for data retrieval"
+files = "Read/write geological data files"
+
+# Wheels - Python dependencies bundled with the extension
+# Note: For Blender Extensions, dependencies should be bundled as wheels
+# Users on older Blender versions will have dependencies installed automatically
+# [wheels]
+
+# Build configuration - files/folders to exclude from the extension package
+[build]
+paths_exclude_pattern = [
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".git/",
+    ".gitignore",
+    ".claude/",
+    ".vscode/",
+    ".idea/",
+    "Docs/",
+    "*.blend1",
+    "*.blend2",
+    "dev_mode.md",
+    "force_reload.py",
+    "make_symlink.txt",
+    "development env.txt",
+    ".clinerules",
+    "NUL",
+]

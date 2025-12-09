@@ -2,13 +2,20 @@
 
 A Blender add-on that integrates with the geoDB API to visualize drill hole data, samples, and perform geological modeling.
 
+For detailed documentation on all features, see the [User Guide](USER_GUIDE.md).
+
 ## Features
 
-- **Secure Authentication**: Log in to the geoDB API with your credentials
-- **Data Visualization**: View drill holes, samples, and geological data in 3D
-- **Sample Analysis**: Color-code samples based on assay values, lithology, or alteration
-- **RBF Interpolation**: Create interpolated surfaces from sample data
-- **Customization**: Configure visualization settings and color schemes
+- **Authentication & Session Management**: Secure login with encrypted token storage
+- **Data Import**: Load companies, projects, drill holes, and samples from the geoDB API
+- **Drill Hole Visualization**:
+  - Assay intervals with color-coded grade ranges
+  - Lithology, alteration, and mineralization intervals
+  - Customizable tube diameters per interval type
+- **Terrain Import**: High-resolution DEM with satellite/topographic textures
+- **Drillhole Planning**: Design new holes with azimuth, dip, and length parameters
+- **RBF Interpolation**: Create 3D grade models with anisotropic search ellipsoids
+- **Simulation Tools**: Generate synthetic drill data for testing (porphyry, vein deposits)
 
 ## Installation
 
@@ -57,7 +64,11 @@ The add-on will automatically install required Python packages:
 
 ## License
 
-Copyright © 2024 Aqua Terra Geoscientists. All rights reserved.
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version.
+
+See [LICENSE](LICENSE) for the full license text.
+
+Copyright © 2025 Aqua Terra Geoscientists.
 
 ## Contact
 
