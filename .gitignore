@@ -26,6 +26,7 @@ dev_mode.md
 development env.txt
 force_reload.py
 make_symlink.txt
+release.cmd
 
 # -----------------------------------------------------------------------------
 # Windows Specific
