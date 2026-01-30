@@ -20,13 +20,13 @@ def is_dev_mode_enabled():
     """Check if development mode is enabled.
 
     Development mode is enabled when a file called 'dev_mode.md' exists
-    in the add-on's root directory. This file is gitignored, so it will
+    in the add-on's directory. This file is gitignored, so it will
     only be present in development environments.
 
     Returns:
         bool: True if dev_mode.md exists, False otherwise.
     """
-    addon_dir = Path(__file__).parent.parent
+    addon_dir = Path(__file__).parent
     dev_mode_file = addon_dir / "dev_mode.md"
     return dev_mode_file.exists()
 

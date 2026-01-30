@@ -178,11 +178,11 @@ class GEODB_PT_DrillholePlanningPanel(Panel):
             row.operator("geodb.clear_planned_previews", text="", icon='X')
 
         # =====================================================================
-        # Section 4: Create/Send to Server
+        # Section 4: Create Hole (Local)
         # =====================================================================
         box = layout.box()
         row = box.row()
-        row.label(text="4. Create Hole", icon='EXPORT')
+        row.label(text="4. Create Hole", icon='ADD')
 
         # Only enable if all required data is set
         can_create = (
@@ -195,10 +195,10 @@ class GEODB_PT_DrillholePlanningPanel(Panel):
             box.label(text="Complete steps above first", icon='INFO')
 
         row = box.row()
-        row.scale_y = 1.5
+        row.scale_y = 1.3
         row.enabled = can_create
         row.operator("geodb.create_planned_hole",
-                    text="Create & Send to Server", icon='EXPORT')
+                    text="Create Planned Hole", icon='ADD')
 
         # Summary of planned hole
         if can_create:
@@ -208,6 +208,142 @@ class GEODB_PT_DrillholePlanningPanel(Panel):
             col.label(text=f"Hole: {props.planning_hole_name}")
             col.label(text=f"Pad: {props.planning_selected_pad_name}")
             col.label(text=f"Az: {props.planning_azimuth:.1f} | Dip: {props.planning_dip:.1f} | Len: {props.planning_length:.1f}m")
+
+        # =====================================================================
+        # Section 5: Sync with Server
+        # =====================================================================
+        box = layout.box()
+        row = box.row()
+        row.label(text="5. Sync with Server", icon='FILE_REFRESH')
+
+        # Count holes by sync status
+        holes_new = 0  # No server ID
+        holes_modified = 0  # Has server ID but needs sync
+        holes_synced = 0  # Synced with server
+
+        for obj in bpy.data.objects:
+            if obj.get('geodb_object_type') == 'planned_hole':
+                hole_id = obj.get('geodb_hole_id')
+                needs_sync = obj.get('geodb_needs_sync', False)
+
+                if hole_id is None:
+                    holes_new += 1
+                elif needs_sync:
+                    holes_modified += 1
+                else:
+                    holes_synced += 1
+
+        total_holes = holes_new + holes_modified + holes_synced
+
+        # Show status
+        if total_holes > 0:
+            sub = box.box()
+            sub.scale_y = 0.85
+            col = sub.column(align=True)
+
+            if holes_new > 0:
+                col.label(text=f"{holes_new} new (not on server)", icon='PLUS')
+            if holes_modified > 0:
+                col.label(text=f"{holes_modified} modified locally", icon='GREASEPENCIL')
+            if holes_synced > 0:
+                col.label(text=f"{holes_synced} synced", icon='CHECKMARK')
+        else:
+            box.label(text="No planned holes in scene", icon='INFO')
+
+        # Sync button
+        row = box.row()
+        row.scale_y = 1.5
+        has_pending = holes_new > 0 or holes_modified > 0
+        if has_pending:
+            row.alert = True  # Highlight if there are pending changes
+        row.operator("geodb.sync_planned_holes",
+                    text="Sync All Planned Holes", icon='FILE_REFRESH')
+
+        # Tip for editing
+        if total_holes > 0:
+            sub = box.row()
+            sub.scale_y = 0.7
+            sub.label(text="Tip: Edit holes in Edit Mode, then sync")
+
+        # =====================================================================
+        # Section 6: Statistics
+        # =====================================================================
+        if total_holes > 0:
+            box = layout.box()
+            row = box.row()
+            row.label(text="6. Statistics", icon='GRAPH')
+
+            # Refresh button
+            row = box.row()
+            row.operator("geodb.refresh_hole_statistics",
+                        text="Refresh Statistics", icon='FILE_REFRESH')
+
+            # Calculate statistics
+            total_meterage = 0.0
+            stats_by_pad = {}  # pad_name -> {'count': int, 'meterage': float}
+
+            for obj in bpy.data.objects:
+                if obj.get('geodb_object_type') == 'planned_hole':
+                    length = obj.get('geodb_length', 0) or 0
+                    total_meterage += length
+
+                    # Get pad info
+                    pad_id = obj.get('geodb_pad_id')
+                    pad_name = obj.get('geodb_pad_name', 'Unknown Pad')
+
+                    if pad_name not in stats_by_pad:
+                        stats_by_pad[pad_name] = {'count': 0, 'meterage': 0.0}
+
+                    stats_by_pad[pad_name]['count'] += 1
+                    stats_by_pad[pad_name]['meterage'] += length
+
+            # Total summary
+            sub = box.box()
+            sub.scale_y = 0.85
+            col = sub.column(align=True)
+            col.label(text=f"Total: {total_holes} holes, {total_meterage:.1f}m", icon='ASSET_MANAGER')
+
+            # By pad breakdown
+            if stats_by_pad:
+                col.separator()
+                col.label(text="By Pad:", icon='OUTLINER_OB_MESH')
+                for pad_name, stats in sorted(stats_by_pad.items()):
+                    col.label(text=f"  {pad_name}: {stats['count']} holes, {stats['meterage']:.1f}m")
+
+        # =====================================================================
+        # Section 7: Selected Hole Info (if a planned hole is selected)
+        # =====================================================================
+        obj = context.active_object
+        if obj and obj.get('geodb_object_type') == 'planned_hole':
+            box = layout.box()
+            row = box.row()
+            row.label(text="Selected Hole", icon='ORIENTATION_CURSOR')
+
+            sub = box.box()
+            sub.scale_y = 0.85
+            col = sub.column(align=True)
+
+            hole_name = obj.get('geodb_hole_name', 'Unknown')
+            hole_id = obj.get('geodb_hole_id')
+            needs_sync = obj.get('geodb_needs_sync', False)
+
+            col.label(text=f"Name: {hole_name}")
+            col.label(text=f"Az: {obj.get('geodb_azimuth', 0):.1f} | Dip: {obj.get('geodb_dip', 0):.1f} | Len: {obj.get('geodb_length', 0):.1f}m")
+
+            # Sync status
+            if hole_id is None:
+                col.label(text="Status: New (not on server)", icon='PLUS')
+            elif needs_sync:
+                col.label(text="Status: Modified locally", icon='GREASEPENCIL')
+            else:
+                col.label(text="Status: Synced", icon='CHECKMARK')
+
+            # Manual update button (in case auto-detection missed it)
+            box.separator()
+            row = box.row()
+            row.scale_y = 1.2
+            row.operator("geodb.update_hole_from_mesh",
+                        text="Recalculate from Curve", icon='FILE_REFRESH')
 
 
 # Registration

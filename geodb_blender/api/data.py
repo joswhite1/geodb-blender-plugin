@@ -7,7 +7,7 @@ companies, projects, drill holes, and samples.
 
 import bpy
 import numpy as np
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable
 
 from .client import GeoDBAPIClient
 from .auth import get_api_client
@@ -16,178 +16,200 @@ class GeoDBData:
     """Class for retrieving and managing geoDB data."""
     
     @staticmethod
-    def get_companies() -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_companies(progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get the list of companies the user has access to.
-        
+
+        Args:
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of companies
         """
         print("\n=== Getting Companies ===")
         client = get_api_client()
         print(f"API client authenticated: {client.is_authenticated()}")
-        
+
         if not client.is_authenticated():
             print("ERROR: Client is not authenticated")
             return False, []
-        
+
         # First check if we already have companies from login
         if client.companies:
             print(f"Using cached companies from login: {len(client.companies)} companies")
             print(f"Companies: {[c.get('name', 'Unknown') for c in client.companies]}")
             return True, client.companies
-        
-        # Otherwise fetch from API with pagination limit
+
+        # Otherwise fetch from API with pagination
         print("Fetching companies from API endpoint...")
-        success, data = client.make_request('GET', 'companies/', params={'page_size': 1000})
-        print(f"API request success: {success}")
+        success, companies = client.get_all_paginated(
+            'companies/',
+            progress_callback=progress_callback
+        )
+
         if success:
-            # API returns paginated response with 'results' field
-            if isinstance(data, dict) and 'results' in data:
-                companies = data['results']
-                print(f"Received {len(companies)} companies from paginated response")
-                print(f"Companies: {[c.get('name', 'Unknown') for c in companies]}")
-                return True, companies
-            elif isinstance(data, list):
-                print(f"Received {len(data)} companies as direct list")
-                print(f"Data: {data}")
-                return True, data
-            else:
-                print(f"WARNING: Unexpected data format: {type(data)}")
-                return True, []
+            print(f"Received {len(companies)} companies")
+            print(f"Companies: {[c.get('name', 'Unknown') for c in companies]}")
+            return True, companies
         else:
-            print(f"ERROR: Failed to fetch companies. Response: {data}")
+            print(f"ERROR: Failed to fetch companies")
             return False, []
     
     @staticmethod
-    def get_projects(company_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_projects(company_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get the list of projects for a company.
-        
+
         Args:
             company_id: The ID of the company
-            
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of projects
         """
         print(f"\n=== Getting Projects for Company ID: {company_id} ===")
         client = get_api_client()
         print(f"API client authenticated: {client.is_authenticated()}")
-        
+
         if not client.is_authenticated():
             print("ERROR: Client is not authenticated")
             return False, []
-        
-        # Try method 1: Filter by company_id parameter
-        endpoint = f'projects/'
-        params = {'company_id': company_id, 'page_size': 1000}
-        print(f"Method 1 - Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
-        print(f"API request success: {success}")
-        
-        # If method 1 fails with server error, try getting all projects and filtering client-side
-        if not success and "500" in str(data):
-            print("Server returned 500 error. Trying fallback: Get all projects and filter client-side")
-            
-            # First, get the company name from the company ID
-            company_name = None
-            if client.companies:
-                for comp in client.companies:
+
+        # Fetch projects with pagination
+        success, projects = client.get_all_paginated(
+            'projects/',
+            params={'company_id': company_id},
+            progress_callback=progress_callback
+        )
+
+        if success:
+            print(f"Received {len(projects)} projects")
+            print(f"Project names: {[p.get('name', 'Unknown') for p in projects]}")
+            return True, projects
+
+        # Fallback: If server error, try getting all projects and filtering client-side
+        print("Primary method failed. Trying fallback: Get all projects and filter client-side")
+
+        # First, get the company name from the company ID
+        company_name = None
+        if client.companies:
+            for comp in client.companies:
+                if comp.get('id') == company_id or str(comp.get('id')) == str(company_id):
+                    company_name = comp.get('name')
+                    break
+
+        if not company_name:
+            # Try to fetch companies to get the name
+            success_comp, companies = GeoDBData.get_companies()
+            if success_comp:
+                for comp in companies:
                     if comp.get('id') == company_id or str(comp.get('id')) == str(company_id):
                         company_name = comp.get('name')
                         break
-            
-            if not company_name:
-                # Try to fetch companies to get the name
-                success_comp, companies = GeoDBData.get_companies()
-                if success_comp:
-                    for comp in companies:
-                        if comp.get('id') == company_id or str(comp.get('id')) == str(company_id):
-                            company_name = comp.get('name')
-                            break
-            
-            print(f"Company name for ID {company_id}: {company_name}")
-            
-            if company_name:
-                # Try filtering by company name instead
-                print(f"Trying with company name filter: company={company_name}")
-                success, data = client.make_request('GET', 'projects/', params={'company': company_name})
-                
-                if success:
-                    projects = data.get('results', data if isinstance(data, list) else [])
-                    print(f"Got {len(projects)} projects using company name filter")
-                    if projects:
-                        print(f"Project names: {[p.get('name', 'Unknown') for p in projects]}")
-                    return True, projects
-            else:
-                # Last resort: get all projects and filter by company name in response
-                print("Could not find company name, getting all projects")
-                success, data = client.make_request('GET', 'projects/')
-                
-                if success and company_name:
-                    all_projects = data.get('results', data if isinstance(data, list) else [])
-                    projects = [p for p in all_projects if p.get('company') == company_name]
-                    print(f"Filtered {len(projects)} projects from {len(all_projects)} total projects")
-                    return True, projects
-        
-        if success:
-            # API returns paginated response with 'results' field
-            if isinstance(data, dict) and 'results' in data:
-                projects = data['results']
-                print(f"Received {len(projects)} projects from paginated response")
-                print(f"Project names: {[p.get('name', 'Unknown') for p in projects]}")
+
+        print(f"Company name for ID {company_id}: {company_name}")
+
+        if company_name:
+            # Try filtering by company name instead
+            print(f"Trying with company name filter: company={company_name}")
+            success, projects = client.get_all_paginated(
+                'projects/',
+                params={'company': company_name},
+                progress_callback=progress_callback
+            )
+
+            if success:
+                print(f"Got {len(projects)} projects using company name filter")
+                if projects:
+                    print(f"Project names: {[p.get('name', 'Unknown') for p in projects]}")
                 return True, projects
-            elif isinstance(data, list):
-                print(f"Received {len(data)} projects as direct list")
-                print(f"Project names: {[p.get('name', 'Unknown') for p in data]}")
-                return True, data
-            else:
-                print(f"WARNING: Unexpected data format: {type(data)}")
-                return True, []
-        else:
-            print(f"ERROR: Failed to fetch projects. Response: {data}")
-            return False, []
+
+        print(f"ERROR: Failed to fetch projects")
+        return False, []
     
     @staticmethod
-    def get_drill_holes(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_drill_holes(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get the list of drill holes for a project.
-        
+
         Args:
             project_id: The ID of the project
-            
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of drill holes
         """
         print(f"\n=== Getting Drill Holes for Project ID: {project_id} ===")
         client = get_api_client()
         print(f"API client authenticated: {client.is_authenticated()}")
-        
+
         if not client.is_authenticated():
             print("ERROR: Client is not authenticated")
             return False, []
-        
-        # Use the correct API endpoint with query parameter
-        endpoint = f'drill-collars/'
-        params = {'project_id': project_id, 'page_size': 1000}
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
-        print(f"API request success: {success}")
-        
+
+        # Fetch drill holes with pagination
+        success, drill_holes = client.get_all_paginated(
+            'drill-collars/',
+            params={'project_id': project_id},
+            progress_callback=progress_callback
+        )
+
         if success:
-            # API returns paginated response with 'results' field
-            if isinstance(data, dict) and 'results' in data:
-                drill_holes = data['results']
-                print(f"Received {len(drill_holes)} drill holes from paginated response")
-                print(f"Drill hole names: {[d.get('name', 'Unknown') for d in drill_holes]}")
-                return True, drill_holes
-            elif isinstance(data, list):
-                print(f"Received {len(data)} drill holes as direct list")
-                print(f"Drill hole names: {[d.get('name', 'Unknown') for d in data]}")
-                return True, data
-            else:
-                print(f"WARNING: Unexpected data format: {type(data)}")
-                return True, []
+            print(f"Received {len(drill_holes)} drill holes")
+            print(f"Drill hole names: {[d.get('name', 'Unknown') for d in drill_holes]}")
+            return True, drill_holes
         else:
-            print(f"ERROR: Failed to fetch drill holes. Response: {data}")
+            print(f"ERROR: Failed to fetch drill holes")
             return False, []
+
+    @staticmethod
+    def get_drill_holes_with_sync(
+        project_id: int,
+        deleted_since: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Get drill holes for a project with deletion sync support.
+
+        This method returns both active drill holes and IDs of soft-deleted holes,
+        enabling the client to remove deleted holes from local cache/scene.
+
+        Args:
+            project_id: The ID of the project
+            deleted_since: ISO timestamp for incremental sync (from last sync_timestamp).
+                          If None, returns all deleted IDs (for first sync).
+            progress_callback: Optional callback(fetched_count, total_count) for progress
+
+        Returns:
+            Tuple[bool, Dict]: Success flag and dict containing:
+                - results: List of active drill hole records
+                - deleted_ids: List of soft-deleted drill hole IDs
+                - sync_timestamp: ISO timestamp to use for next sync's deleted_since
+        """
+        print(f"\n=== Getting Drill Holes with Sync for Project ID: {project_id} ===")
+        if deleted_since:
+            print(f"Incremental sync from: {deleted_since}")
+
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {'results': [], 'deleted_ids': [], 'sync_timestamp': None}
+
+        # Build params
+        params = {'project_id': project_id}
+        if deleted_since:
+            params['deleted_since'] = deleted_since
+
+        # Fetch with sync metadata
+        success, result = client.get_all_paginated_with_sync(
+            'drill-collars/',
+            params=params,
+            progress_callback=progress_callback
+        )
+
+        if success:
+            print(f"Received {len(result['results'])} drill holes, "
+                  f"{len(result['deleted_ids'])} deleted IDs")
+            return True, result
+        else:
+            print("ERROR: Failed to fetch drill holes")
+            return False, result
     
     @staticmethod
     def get_drill_hole_details(drill_hole_id: int) -> Tuple[bool, Dict[str, Any]]:
@@ -211,45 +233,37 @@ class GeoDBData:
             return False, {}
     
     @staticmethod
-    def get_surveys(drill_hole_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_surveys(drill_hole_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get the surveys for a drill hole.
-        
+
         Args:
             drill_hole_id: The ID of the drill collar
-            
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of surveys
         """
         client = get_api_client()
         if not client.is_authenticated():
             return False, []
-        
-        # Use correct drill-surveys endpoint with bhid filter
-        endpoint = 'drill-surveys/'
-        params = {'bhid': drill_hole_id, 'page_size': 1000}
-        success, data = client.make_request('GET', endpoint, params=params)
-        
-        if success:
-            # API returns paginated response with 'results' field
-            if isinstance(data, dict) and 'results' in data:
-                surveys = data['results']
-                return True, surveys
-            elif isinstance(data, list):
-                return True, data
-            else:
-                return True, []
-        else:
-            return False, []
+
+        # Fetch surveys with pagination
+        return client.get_all_paginated(
+            'drill-surveys/',
+            params={'bhid': drill_hole_id},
+            progress_callback=progress_callback
+        )
     
     @staticmethod
-    def get_all_surveys_for_project(project_id: int) -> Tuple[bool, Dict[int, List[Dict[str, Any]]]]:
+    def get_all_surveys_for_project(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Dict[int, List[Dict[str, Any]]]]:
         """Get ALL surveys for a project in a single API call.
-        
+
         This is much more efficient than calling get_surveys() for each drill hole.
-        
+
         Args:
             project_id: The ID of the project
-            
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+
         Returns:
             Tuple[bool, Dict[hole_id, List[surveys]]]: Success flag and surveys grouped by drill hole ID
         """
@@ -258,24 +272,19 @@ class GeoDBData:
         if not client.is_authenticated():
             print("ERROR: Client is not authenticated")
             return False, {}
-        
-        # Fetch ALL surveys for the project in one call
-        endpoint = 'drill-surveys/'
-        params = {'project_id': project_id, 'page_size': 10000}  # Large page size
-        print(f"Fetching from endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
-        
+
+        # Fetch ALL surveys for the project with pagination
+        success, surveys = client.get_all_paginated(
+            'drill-surveys/',
+            params={'project_id': project_id},
+            progress_callback=progress_callback,
+            limit=500  # Use larger pages for bulk fetches
+        )
+
         if not success:
-            print(f"ERROR: Failed to fetch surveys. Response: {data}")
+            print(f"ERROR: Failed to fetch surveys")
             return False, {}
-        
-        # Extract surveys from response
-        surveys = []
-        if isinstance(data, dict) and 'results' in data:
-            surveys = data['results']
-        elif isinstance(data, list):
-            surveys = data
-        
+
         print(f"Received {len(surveys)} total surveys for project")
         
         # Group by drill hole ID (bhid)
@@ -333,40 +342,32 @@ class GeoDBData:
         return True, result
     
     @staticmethod
-    def get_samples(drill_hole_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_samples(drill_hole_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get the samples for a drill hole.
-        
+
         Note: Assay data is automatically included in the sample response.
-        
+
         Args:
             drill_hole_id: The ID of the drill collar
-            
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of samples (with nested assay data)
         """
         client = get_api_client()
         if not client.is_authenticated():
             return False, []
-        
-        # Use correct drill-samples endpoint with bhid filter
-        endpoint = 'drill-samples/'
-        params = {'bhid': drill_hole_id, 'page_size': 1000}
-        success, data = client.make_request('GET', endpoint, params=params)
-        
-        if success:
-            # API returns paginated response with 'results' field
-            if isinstance(data, dict) and 'results' in data:
-                samples = data['results']
-                return True, samples
-            elif isinstance(data, list):
-                return True, data
-            else:
-                return True, []
-        else:
-            return False, []
+
+        # Fetch samples with pagination
+        return client.get_all_paginated(
+            'drill-samples/',
+            params={'bhid': drill_hole_id},
+            progress_callback=progress_callback
+        )
     
     @staticmethod
-    def get_all_samples_for_project(project_id: int, assay_config_id: int = None) -> Tuple[bool, Dict[int, List[Dict[str, Any]]]]:
+    def get_all_samples_for_project(project_id: int, assay_config_id: int = None,
+                                     progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Dict[int, List[Dict[str, Any]]]]:
         """Get ALL samples for a project in a single API call.
 
         This is much more efficient than calling get_samples() for each drill hole.
@@ -374,6 +375,7 @@ class GeoDBData:
         Args:
             project_id: The ID of the project
             assay_config_id: (v1.4 REQUIRED) AssayRangeConfiguration ID for color/element selection
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, Dict[hole_id, List[samples]]]: Success flag and samples grouped by drill hole ID
@@ -388,9 +390,8 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, {}
 
-        # Fetch ALL samples for the project in one call
-        endpoint = 'drill-samples/'
-        params = {'project_id': project_id, 'page_size': 10000}  # Large page size
+        # Build params
+        params = {'project_id': project_id}
 
         # v1.4: REQUIRED - Include assay_config_id for server-side config application
         if assay_config_id:
@@ -399,20 +400,18 @@ class GeoDBData:
         else:
             print(f"WARNING: assay_config_id is falsy, NOT adding to params!")
 
-        print(f"Fetching from endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
-        
+        # Fetch ALL samples for the project with pagination
+        success, samples = client.get_all_paginated(
+            'drill-samples/',
+            params=params,
+            progress_callback=progress_callback,
+            limit=500  # Use larger pages for bulk fetches
+        )
+
         if not success:
-            print(f"ERROR: Failed to fetch samples. Response: {data}")
+            print(f"ERROR: Failed to fetch samples")
             return False, {}
-        
-        # Extract samples from response
-        samples = []
-        if isinstance(data, dict) and 'results' in data:
-            samples = data['results']
-        elif isinstance(data, list):
-            samples = data
-        
+
         print(f"Received {len(samples)} total samples for project")
         
         # Group by drill hole ID (bhid)
@@ -473,41 +472,35 @@ class GeoDBData:
     # in the drill-samples response as nested data
     
     @staticmethod
-    def get_assay_range_configurations(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_assay_range_configurations(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get assay range configurations for a project.
-        
+
         Args:
             project_id: The ID of the project
-            
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of assay range configurations
         """
         print(f"\n=== Getting Assay Range Configurations for Project ID: {project_id} ===")
         client = get_api_client()
-        
+
         if not client.is_authenticated():
             print("ERROR: Client is not authenticated")
             return False, []
-        
-        endpoint = 'assay-range-configurations/'
-        params = {'project_id': project_id, 'page_size': 1000}
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
-        
+
+        # Fetch assay range configurations with pagination
+        success, configs = client.get_all_paginated(
+            'assay-range-configurations/',
+            params={'project_id': project_id},
+            progress_callback=progress_callback
+        )
+
         if success:
-            # API returns paginated response with 'results' field
-            if isinstance(data, dict) and 'results' in data:
-                configs = data['results']
-                print(f"Received {len(configs)} assay range configurations")
-                return True, configs
-            elif isinstance(data, list):
-                print(f"Received {len(data)} assay range configurations")
-                return True, data
-            else:
-                print(f"WARNING: Unexpected data format: {type(data)}")
-                return True, []
+            print(f"Received {len(configs)} assay range configurations")
+            return True, configs
         else:
-            print(f"ERROR: Failed to fetch assay range configurations. Response: {data}")
+            print(f"ERROR: Failed to fetch assay range configurations")
             return False, []
     
     @staticmethod
@@ -653,24 +646,29 @@ class GeoDBData:
 
 
     @staticmethod
-    def fetch_all_project_data(project_id: int, company_id: int, 
-                                project_name: str) -> Tuple[bool, Dict[str, Any]]:
+    def fetch_all_project_data(project_id: int, company_id: int,
+                                project_name: str,
+                                deleted_since: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
         """
         Fetch all drill hole data for a project in a single batch.
-        
+
         This function makes minimal API calls to retrieve all data:
         - 1 call for project details (coordinate system metadata)
-        - 1 call for collars
+        - 1 call for collars (with deletion sync support)
         - 1 call for surveys
         - 1 call for samples
         - 1 call for lithology (if available)
         - 1 call for alteration (if available)
-        
+
         Args:
             project_id: Project ID
             company_id: Company ID
             project_name: Project name
-            
+            deleted_since: Optional ISO timestamp for incremental deletion sync.
+                          If provided, only returns deleted_ids for records deleted
+                          after this time. Use the sync_timestamp from a previous
+                          sync response.
+
         Returns:
             Tuple of (success, data_dictionary)
             data_dictionary contains:
@@ -680,14 +678,18 @@ class GeoDBData:
                 - samples: Dict[bhid, List] of sample data grouped by hole
                 - lithology: Dict[bhid, List] of lithology data grouped by hole
                 - alteration: Dict[bhid, List] of alteration data grouped by hole
+                - deleted_collar_ids: List of soft-deleted collar IDs (new)
+                - sync_timestamp: ISO timestamp for next sync (new)
         """
         print(f"\n=== Fetching All Project Data for {project_name} (ID: {project_id}) ===")
-        
+        if deleted_since:
+            print(f"Incremental deletion sync from: {deleted_since}")
+
         client = get_api_client()
         if not client.is_authenticated():
             print("ERROR: Client is not authenticated")
             return False, {}
-        
+
         result_data = {
             'project_id': project_id,
             'company_id': company_id,
@@ -697,9 +699,11 @@ class GeoDBData:
             'surveys': {},
             'samples': {},
             'lithology': {},
-            'alteration': {}
+            'alteration': {},
+            'deleted_collar_ids': [],  # New: IDs of soft-deleted collars
+            'sync_timestamp': None,  # New: Timestamp for next sync
         }
-        
+
         # 0. Fetch project details for coordinate system metadata
         print("\n[0/5] Fetching project metadata...")
         try:
@@ -725,16 +729,30 @@ class GeoDBData:
                 print("WARNING: Could not fetch project metadata")
         except Exception as e:
             print(f"WARNING: Failed to fetch project metadata: {e}")
-        
-        # 1. Fetch all collars for the project
-        print("\n[1/5] Fetching collars...")
-        success, collars = GeoDBData.get_drill_holes(project_id)
+
+        # 1. Fetch all collars for the project (with deletion sync)
+        print("\n[1/5] Fetching collars (with deletion sync)...")
+        success, collar_result = GeoDBData.get_drill_holes_with_sync(
+            project_id,
+            deleted_since=deleted_since
+        )
         if not success:
             print("ERROR: Failed to fetch collars")
             return False, {}
-        
-        print(f"✓ Retrieved {len(collars)} collars")
+
+        collars = collar_result.get('results', [])
+        deleted_ids = collar_result.get('deleted_ids', [])
+        sync_timestamp = collar_result.get('sync_timestamp')
+
+        print(f"✓ Retrieved {len(collars)} active collars")
+        if deleted_ids:
+            print(f"  - Detected {len(deleted_ids)} soft-deleted collars")
+        if sync_timestamp:
+            print(f"  - Sync timestamp for next sync: {sync_timestamp}")
+
         result_data['collars'] = collars
+        result_data['deleted_collar_ids'] = deleted_ids
+        result_data['sync_timestamp'] = sync_timestamp
         
         # Extract hole IDs for reference
         hole_ids = [collar.get('id') for collar in collars if collar.get('id')]
@@ -764,19 +782,13 @@ class GeoDBData:
         # 4. Fetch lithology data (if endpoint exists)
         print("\n[4/5] Fetching lithology...")
         try:
-            success, lithology_data = client.make_request(
-                'GET', 
-                'lithology/', 
-                params={'project': project_id, 'page_size': 10000}
+            success, lithology_list = client.get_all_paginated(
+                'lithology/',
+                params={'project': project_id},
+                limit=500
             )
-            
-            if success and lithology_data:
-                # Handle paginated response
-                if isinstance(lithology_data, dict) and 'results' in lithology_data:
-                    lithology_list = lithology_data['results']
-                else:
-                    lithology_list = lithology_data if isinstance(lithology_data, list) else []
-                
+
+            if success and lithology_list:
                 # Group by bhid
                 lithology_by_hole = {}
                 for lith in lithology_list:
@@ -828,19 +840,13 @@ class GeoDBData:
         # 6. Fetch alteration data (if endpoint exists)
         print("\n[6/6] Fetching alteration...")
         try:
-            success, alteration_data = client.make_request(
-                'GET',
+            success, alteration_list = client.get_all_paginated(
                 'alteration/',
-                params={'project': project_id, 'page_size': 10000}
+                params={'project': project_id},
+                limit=500
             )
-            
-            if success and alteration_data:
-                # Handle paginated response
-                if isinstance(alteration_data, dict) and 'results' in alteration_data:
-                    alteration_list = alteration_data['results']
-                else:
-                    alteration_list = alteration_data if isinstance(alteration_data, list) else []
-                
+
+            if success and alteration_list:
                 # Group by bhid
                 alteration_by_hole = {}
                 for alt in alteration_list:
@@ -923,14 +929,21 @@ class GeoDBData:
         print(f"  - Available Lithologies: {len(result_data['available_lithologies'])}")
         print(f"  - Available Alterations: {len(result_data['available_alterations'])}")
 
+        # Print deletion sync info
+        if result_data.get('deleted_collar_ids'):
+            print(f"  - Deleted Collar IDs: {len(result_data['deleted_collar_ids'])}")
+        if result_data.get('sync_timestamp'):
+            print(f"  - Sync Timestamp: {result_data['sync_timestamp']}")
+
         return True, result_data
 
     @staticmethod
-    def get_drill_traces(project_id: int) -> Tuple[bool, Dict[int, Dict[str, Any]]]:
+    def get_drill_traces(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Dict[int, Dict[str, Any]]]:
         """Get drill traces (desurveyed paths) for all holes in a project.
 
         Args:
             project_id: The ID of the project
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, Dict[hole_id, trace_data]]: Success flag and traces by hole ID
@@ -941,21 +954,16 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, {}
 
-        endpoint = 'drill-traces/'
-        params = {'project_id': project_id, 'page_size': 1000}
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+        # Fetch drill traces with pagination
+        success, traces = client.get_all_paginated(
+            'drill-traces/',
+            params={'project_id': project_id},
+            progress_callback=progress_callback
+        )
 
         if not success:
-            print(f"ERROR: Failed to fetch drill traces. Response: {data}")
+            print(f"ERROR: Failed to fetch drill traces")
             return False, {}
-
-        # Extract traces from response
-        traces = []
-        if isinstance(data, dict) and 'results' in data:
-            traces = data['results']
-        elif isinstance(data, list):
-            traces = data
 
         print(f"Received {len(traces)} drill traces (summary)")
 
@@ -1011,11 +1019,12 @@ class GeoDBData:
         return True, data
 
     @staticmethod
-    def get_lithology_sets(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_lithology_sets(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get lithology sets for a project.
 
         Args:
             project_id: The ID of the project
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of lithology sets
@@ -1026,31 +1035,27 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, []
 
-        endpoint = 'drill-lithology-sets/'
-        params = {'project': project_id, 'page_size': 1000}  # API uses 'project' not 'project_id'
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+        # Fetch lithology sets with pagination (API uses 'project' not 'project_id')
+        success, sets = client.get_all_paginated(
+            'drill-lithology-sets/',
+            params={'project': project_id},
+            progress_callback=progress_callback
+        )
 
-        if not success:
-            print(f"ERROR: Failed to fetch lithology sets. Response: {data}")
+        if success:
+            print(f"Retrieved {len(sets)} lithology sets")
+            return True, sets
+        else:
+            print(f"ERROR: Failed to fetch lithology sets")
             return False, []
 
-        # Extract sets from response
-        sets = []
-        if isinstance(data, dict) and 'results' in data:
-            sets = data['results']
-        elif isinstance(data, list):
-            sets = data
-
-        print(f"Retrieved {len(sets)} lithology sets")
-        return True, sets
-
     @staticmethod
-    def get_alteration_sets(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_alteration_sets(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get alteration sets for a project.
 
         Args:
             project_id: The ID of the project
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of alteration sets
@@ -1061,31 +1066,27 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, []
 
-        endpoint = 'drill-alteration-sets/'
-        params = {'project': project_id, 'page_size': 1000}  # API uses 'project' not 'project_id'
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+        # Fetch alteration sets with pagination (API uses 'project' not 'project_id')
+        success, sets = client.get_all_paginated(
+            'drill-alteration-sets/',
+            params={'project': project_id},
+            progress_callback=progress_callback
+        )
 
-        if not success:
-            print(f"ERROR: Failed to fetch alteration sets. Response: {data}")
+        if success:
+            print(f"Retrieved {len(sets)} alteration sets")
+            return True, sets
+        else:
+            print(f"ERROR: Failed to fetch alteration sets")
             return False, []
 
-        # Extract sets from response
-        sets = []
-        if isinstance(data, dict) and 'results' in data:
-            sets = data['results']
-        elif isinstance(data, list):
-            sets = data
-
-        print(f"Retrieved {len(sets)} alteration sets")
-        return True, sets
-
     @staticmethod
-    def get_mineralization_sets(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_mineralization_sets(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get mineralization sets for a project.
 
         Args:
             project_id: The ID of the project
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of mineralization sets
@@ -1096,32 +1097,29 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, []
 
-        endpoint = 'drill-mineralization-sets/'
-        params = {'project': project_id, 'page_size': 1000}  # API uses 'project' not 'project_id'
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+        # Fetch mineralization sets with pagination (API uses 'project' not 'project_id')
+        success, sets = client.get_all_paginated(
+            'drill-mineralization-sets/',
+            params={'project': project_id},
+            progress_callback=progress_callback
+        )
 
-        if not success:
-            print(f"ERROR: Failed to fetch mineralization sets. Response: {data}")
+        if success:
+            print(f"Retrieved {len(sets)} mineralization sets")
+            return True, sets
+        else:
+            print(f"ERROR: Failed to fetch mineralization sets")
             return False, []
 
-        # Extract sets from response
-        sets = []
-        if isinstance(data, dict) and 'results' in data:
-            sets = data['results']
-        elif isinstance(data, list):
-            sets = data
-
-        print(f"Retrieved {len(sets)} mineralization sets")
-        return True, sets
-
     @staticmethod
-    def get_lithologies_for_project(project_id: int, set_id: int = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
+    def get_lithologies_for_project(project_id: int, set_id: int = None,
+                                     progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
         """Get all lithology intervals for a project, grouped by drill hole name.
 
         Args:
             project_id: The ID of the project
             set_id: Optional lithology set ID to filter by
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, Dict[hole_name, List[intervals]]]: Success flag and lithologies by hole name
@@ -1132,23 +1130,22 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, {}
 
-        endpoint = 'drill-lithologies/'
-        params = {'project_id': project_id, 'page_size': 10000}
+        # Build params
+        params = {'project_id': project_id}
         if set_id is not None:
             params['drill_lithology_set'] = set_id  # API uses 'drill_lithology_set' parameter
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+
+        # Fetch lithologies with pagination
+        success, lithologies = client.get_all_paginated(
+            'drill-lithologies/',
+            params=params,
+            progress_callback=progress_callback,
+            limit=500  # Use larger pages for bulk fetches
+        )
 
         if not success:
-            print(f"ERROR: Failed to fetch lithologies. Response: {data}")
+            print(f"ERROR: Failed to fetch lithologies")
             return False, {}
-
-        # Extract lithologies from response
-        lithologies = []
-        if isinstance(data, dict) and 'results' in data:
-            lithologies = data['results']
-        elif isinstance(data, list):
-            lithologies = data
 
         print(f"Received {len(lithologies)} lithology intervals")
 
@@ -1176,12 +1173,14 @@ class GeoDBData:
         return True, lithologies_by_hole
 
     @staticmethod
-    def get_alterations_for_project(project_id: int, set_id: int = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
+    def get_alterations_for_project(project_id: int, set_id: int = None,
+                                     progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
         """Get all alteration intervals for a project, grouped by drill hole name.
 
         Args:
             project_id: The ID of the project
             set_id: Optional alteration set ID to filter by
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, Dict[hole_name, List[intervals]]]: Success flag and alterations by hole name
@@ -1192,23 +1191,22 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, {}
 
-        endpoint = 'drill-alterations/'
-        params = {'project_id': project_id, 'page_size': 10000}
+        # Build params
+        params = {'project_id': project_id}
         if set_id is not None:
             params['drill_alteration_set'] = set_id  # API uses 'drill_alteration_set' parameter
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+
+        # Fetch alterations with pagination
+        success, alterations = client.get_all_paginated(
+            'drill-alterations/',
+            params=params,
+            progress_callback=progress_callback,
+            limit=500  # Use larger pages for bulk fetches
+        )
 
         if not success:
-            print(f"ERROR: Failed to fetch alterations. Response: {data}")
+            print(f"ERROR: Failed to fetch alterations")
             return False, {}
-
-        # Extract alterations from response
-        alterations = []
-        if isinstance(data, dict) and 'results' in data:
-            alterations = data['results']
-        elif isinstance(data, list):
-            alterations = data
 
         print(f"Received {len(alterations)} alteration intervals")
 
@@ -1236,12 +1234,14 @@ class GeoDBData:
         return True, alterations_by_hole
 
     @staticmethod
-    def get_mineralizations_for_project(project_id: int, set_id: int = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
+    def get_mineralizations_for_project(project_id: int, set_id: int = None,
+                                         progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, Dict[str, List[Dict[str, Any]]]]:
         """Get all mineralization intervals for a project, grouped by drill hole name.
 
         Args:
             project_id: The ID of the project
             set_id: Optional mineralization set ID to filter by
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, Dict[hole_name, List[intervals]]]: Success flag and mineralizations by hole name
@@ -1252,23 +1252,22 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, {}
 
-        endpoint = 'drill-mineralizations/'
-        params = {'project_id': project_id, 'page_size': 10000}
+        # Build params
+        params = {'project_id': project_id}
         if set_id is not None:
             params['drill_mineralization_set'] = set_id  # API uses 'drill_mineralization_set' parameter
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+
+        # Fetch mineralizations with pagination
+        success, mineralizations = client.get_all_paginated(
+            'drill-mineralizations/',
+            params=params,
+            progress_callback=progress_callback,
+            limit=500  # Use larger pages for bulk fetches
+        )
 
         if not success:
-            print(f"ERROR: Failed to fetch mineralizations. Response: {data}")
+            print(f"ERROR: Failed to fetch mineralizations")
             return False, {}
-
-        # Extract mineralizations from response
-        mineralizations = []
-        if isinstance(data, dict) and 'results' in data:
-            mineralizations = data['results']
-        elif isinstance(data, list):
-            mineralizations = data
 
         print(f"Received {len(mineralizations)} mineralization intervals")
 
@@ -1348,6 +1347,12 @@ class GeoDBData:
             error_msg = elevation_data.get('error', 'No elevation data available') if isinstance(elevation_data, dict) else str(elevation_data)
             print(f"ERROR: Failed to fetch elevation data: {error_msg}")
             return False, {'error': error_msg}
+
+        # Debug: Log all keys in elevation response to diagnose texture issues
+        print(f"DEBUG: Elevation API response keys: {list(elevation_data.keys())}")
+        # Check for texture-related fields
+        texture_fields = [k for k in elevation_data.keys() if 'texture' in k.lower() or 'imagery' in k.lower() or 'satellite' in k.lower() or 'topo' in k.lower()]
+        print(f"DEBUG: Texture-related fields found: {texture_fields}")
 
         # Step 2: Extract terrain mesh URL
         terrain_meshes = elevation_data.get('terrain_meshes', {})
@@ -1459,34 +1464,29 @@ class GeoDBData:
         satellite_url = elevation_data.get('satellite_imagery_url')
         topo_url = elevation_data.get('topo_imagery_url')
 
-        # Build available_textures list from the response
-        available_textures = []
+        # Check for available_textures directly in response (v1.4+ API)
+        # This is the preferred source as it includes all texture types with their URLs
+        available_textures = elevation_data.get('available_textures', [])
 
-        if satellite_url:
-            available_textures.append({
-                'id': 1,
-                'name': 'Satellite Imagery',
-                'type': 'satellite',
-                'url': satellite_url,
-                'display_order': 1
-            })
+        # If available_textures is empty but we have legacy URLs, build the list manually
+        if not available_textures:
+            if satellite_url:
+                available_textures.append({
+                    'id': 1,
+                    'name': 'Satellite Imagery',
+                    'type': 'satellite',
+                    'url': satellite_url,
+                    'display_order': 1
+                })
 
-        if topo_url:
-            available_textures.append({
-                'id': 2,
-                'name': 'Topographic Map',
-                'type': 'topo',
-                'url': topo_url,
-                'display_order': 2
-            })
-
-        # Check for additional textures in the response
-        if 'textures' in elevation_data:
-            textures_data = elevation_data.get('textures', {})
-            extra_textures = textures_data.get('available_textures', [])
-            for tex in extra_textures:
-                if tex.get('type') not in ['satellite', 'topo']:
-                    available_textures.append(tex)
+            if topo_url:
+                available_textures.append({
+                    'id': 2,
+                    'name': 'Topographic Map',
+                    'type': 'topo',
+                    'url': topo_url,
+                    'display_order': 2
+                })
 
         print(f"SUCCESS: Found {len(available_textures)} available textures")
         for tex in available_textures:
@@ -1499,13 +1499,14 @@ class GeoDBData:
         }
 
     @staticmethod
-    def get_drill_pads_blender(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+    def get_drill_pads_blender(project_id: int, progress_callback: Optional[Callable[[int, int], None]] = None) -> Tuple[bool, List[Dict[str, Any]]]:
         """Get drill pads with local grid coordinates for Blender visualization.
 
-        Uses: GET /api/v1/drill-pads/blender/
+        Uses: GET /api/v2/drill-pads/blender/
 
         Args:
             project_id: The ID of the project
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
 
         Returns:
             Tuple[bool, List[Dict]]: Success flag and list of drill pads with:
@@ -1523,21 +1524,16 @@ class GeoDBData:
             print("ERROR: Client is not authenticated")
             return False, []
 
-        endpoint = 'drill-pads/blender/'
-        params = {'project_id': project_id, 'page_size': 1000}
-        print(f"Requesting endpoint: {endpoint} with params: {params}")
-        success, data = client.make_request('GET', endpoint, params=params)
+        # Fetch drill pads with pagination
+        success, pads = client.get_all_paginated(
+            'drill-pads/blender/',
+            params={'project_id': project_id},
+            progress_callback=progress_callback
+        )
 
         if not success:
-            print(f"ERROR: Failed to fetch drill pads. Response: {data}")
+            print(f"ERROR: Failed to fetch drill pads")
             return False, []
-
-        # Extract pads from response
-        pads = []
-        if isinstance(data, dict) and 'results' in data:
-            pads = data['results']
-        elif isinstance(data, list):
-            pads = data
 
         print(f"Retrieved {len(pads)} drill pads")
         for pad in pads[:3]:  # Show first 3 for debugging
@@ -1588,3 +1584,100 @@ class GeoDBData:
 
         print(f"SUCCESS: Created drill hole: {data.get('name', 'Unknown')}")
         return True, data
+
+    @staticmethod
+    def get_planned_holes(project_id: int) -> Tuple[bool, List[Dict[str, Any]]]:
+        """Fetch all planned holes (hole_status='PL') for a project.
+
+        Uses: GET /api/v2/drill-collars/?project_id=X&hole_status=PL
+
+        Args:
+            project_id: The project ID to fetch planned holes for
+
+        Returns:
+            Tuple[bool, List[Dict]]: Success flag and list of planned holes
+        """
+        print(f"\n=== Getting Planned Holes for Project {project_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, []
+
+        success, holes = client.get_all_paginated(
+            'drill-collars/',
+            params={'project_id': project_id, 'hole_status': 'PL'}
+        )
+
+        if not success:
+            print("ERROR: Failed to fetch planned holes")
+            return False, []
+
+        print(f"Retrieved {len(holes)} planned holes")
+        return True, holes
+
+    @staticmethod
+    def update_planned_hole(hole_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        """Update an existing planned hole via the API using upsert (POST with natural keys).
+
+        The API doesn't support PATCH by ID. Instead, use POST to the collection
+        endpoint with natural keys for upsert operations.
+
+        Uses: POST /api/v2/drill-collars/
+
+        Args:
+            hole_data: Dictionary with full hole data including natural keys
+                       (name, project with name/company)
+
+        Returns:
+            Tuple[bool, Dict]: Success flag and updated hole data or error message
+        """
+        print(f"\n=== Updating Planned Hole (upsert) ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {'error': 'Not authenticated'}
+
+        endpoint = 'drill-collars/'
+        print(f"POST (upsert) to endpoint: {endpoint}")
+        print(f"Hole data: {hole_data}")
+
+        success, data = client.make_request('POST', endpoint, data=hole_data)
+
+        if not success:
+            error_msg = data.get('error', str(data)) if isinstance(data, dict) else str(data)
+            print(f"ERROR: Failed to update drill hole. Response: {error_msg}")
+            return False, {'error': error_msg}
+
+        print(f"SUCCESS: Updated drill hole: {data.get('name', 'Unknown')}")
+        return True, data
+
+    @staticmethod
+    def delete_planned_hole(hole_id: int) -> Tuple[bool, Dict[str, Any]]:
+        """Delete a planned hole from the server.
+
+        Uses: DELETE /api/v2/drill-collars/{hole_id}/
+
+        Args:
+            hole_id: The ID of the hole to delete
+
+        Returns:
+            Tuple[bool, Dict]: Success flag and empty dict or error message
+        """
+        print(f"\n=== Deleting Planned Hole {hole_id} ===")
+        client = get_api_client()
+        if not client.is_authenticated():
+            print("ERROR: Client is not authenticated")
+            return False, {'error': 'Not authenticated'}
+
+        endpoint = f'drill-collars/{hole_id}/'
+        print(f"DELETE to endpoint: {endpoint}")
+
+        success, data = client.make_request('DELETE', endpoint)
+
+        if not success:
+            error_msg = data.get('error', str(data)) if isinstance(data, dict) else str(data)
+            print(f"ERROR: Failed to delete drill hole. Response: {error_msg}")
+            return False, {'error': error_msg}
+
+        print(f"SUCCESS: Deleted drill hole {hole_id}")
+        return True, {}

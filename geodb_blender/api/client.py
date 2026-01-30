@@ -14,24 +14,36 @@ import datetime
 import uuid
 import platform
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, Optional, Tuple, Union, List, Callable
 
 import bpy
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-# API Constants
-API_BASE_URL = "https://geodb.io/api/v1/"
+# API Constants - v2 API with pagination support
+API_BASE_URL = "https://geodb.io/api/v2/"
 API_TOKEN_URL = f"{API_BASE_URL}api-token-auth/"
 API_CHECK_TOKEN_URL = f"{API_BASE_URL}check-token/"
 API_LOGOUT_URL = f"{API_BASE_URL}api-logout/"
 
+# 2FA endpoints (v1 API - separate from main v2 API)
+API_2FA_BASE_URL = "https://geodb.io/api/v1/"
+API_VERIFY_2FA_URL = f"{API_2FA_BASE_URL}auth/verify-2fa/"
+API_REQUEST_2FA_RECOVERY_URL = f"{API_2FA_BASE_URL}auth/request-2fa-recovery/"
+API_VERIFY_2FA_RECOVERY_URL = f"{API_2FA_BASE_URL}auth/verify-2fa-recovery/"
+
 # Local development settings (can be toggled in preferences)
-DEV_API_BASE_URL = "http://localhost:8000/api/v1/"
+DEV_API_BASE_URL = "http://localhost:8000/api/v2/"
 DEV_API_TOKEN_URL = f"{DEV_API_BASE_URL}api-token-auth/"
 DEV_API_CHECK_TOKEN_URL = f"{DEV_API_BASE_URL}check-token/"
 DEV_API_LOGOUT_URL = f"{DEV_API_BASE_URL}api-logout/"
+
+# 2FA endpoints for development
+DEV_API_2FA_BASE_URL = "http://localhost:8000/api/v1/"
+DEV_API_VERIFY_2FA_URL = f"{DEV_API_2FA_BASE_URL}auth/verify-2fa/"
+DEV_API_REQUEST_2FA_RECOVERY_URL = f"{DEV_API_2FA_BASE_URL}auth/request-2fa-recovery/"
+DEV_API_VERIFY_2FA_RECOVERY_URL = f"{DEV_API_2FA_BASE_URL}auth/verify-2fa-recovery/"
 
 # Token storage constants
 # Use MAC address + hostname for machine-specific identifier (available during registration)
@@ -54,7 +66,10 @@ class GeoDBAPIClient:
         self.user_info = None
         self.token_expiry = None
         self.companies = None
-        
+
+        # 2FA session state (temporary, not persisted)
+        self.pending_2fa_session = None  # Stores session_token, user_id when 2FA is required
+
         # Create a persistent session for connection pooling
         self.session = requests.Session()
         
@@ -64,11 +79,19 @@ class GeoDBAPIClient:
             self.token_url = DEV_API_TOKEN_URL
             self.check_token_url = DEV_API_CHECK_TOKEN_URL
             self.logout_url = DEV_API_LOGOUT_URL
+            # 2FA URLs
+            self.verify_2fa_url = DEV_API_VERIFY_2FA_URL
+            self.request_2fa_recovery_url = DEV_API_REQUEST_2FA_RECOVERY_URL
+            self.verify_2fa_recovery_url = DEV_API_VERIFY_2FA_RECOVERY_URL
         else:
             self.base_url = API_BASE_URL
             self.token_url = API_TOKEN_URL
             self.check_token_url = API_CHECK_TOKEN_URL
             self.logout_url = API_LOGOUT_URL
+            # 2FA URLs
+            self.verify_2fa_url = API_VERIFY_2FA_URL
+            self.request_2fa_recovery_url = API_REQUEST_2FA_RECOVERY_URL
+            self.verify_2fa_recovery_url = API_VERIFY_2FA_RECOVERY_URL
         
         # Try to load saved token
         self._load_token()
@@ -266,31 +289,38 @@ class GeoDBAPIClient:
         except Exception:
             return False
     
-    def login(self, username: str, password: str, save_token: bool = False, 
-              token_password: Optional[str] = None) -> Tuple[bool, str]:
+    def login(self, username: str, password: str, save_token: bool = False,
+              token_password: Optional[str] = None) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """Log in to the geoDB API.
-        
+
         Args:
             username: The username to log in with.
             password: The password to log in with.
             save_token: Whether to save the token for later use.
             token_password: The password to encrypt the token with, if saving.
-            
+
         Returns:
-            A tuple of (success, message).
+            A tuple of (success, message, extra_data).
+            - If 2FA is required, success=False, message contains info, and extra_data
+              contains {'requires_2fa': True, 'session_token': ..., 'has_recovery_email': ...}
+            - Otherwise extra_data is None.
         """
         print(f"\n=== geoDB Login Attempt ===")
         print(f"Username: {username}")
         print(f"API URL: {self.token_url}")
         print(f"Save token: {save_token}")
-        
+
+        # Store credentials temporarily for use after 2FA verification
+        self._pending_save_token = save_token
+        self._pending_token_password = token_password
+
         try:
             # Prepare login data
             login_data = {
                 'username': username,
                 'password': password,
             }
-            
+
             # Send login request
             print("Sending login request...")
             response = self.session.post(
@@ -299,37 +329,65 @@ class GeoDBAPIClient:
                 headers={'Content-Type': 'application/json'},
                 timeout=10.0,
             )
-            
+
             print(f"Response status code: {response.status_code}")
-            
+
             # Check if login was successful
             if response.status_code == 200:
                 # Parse response data
                 data = response.json()
                 print(f"Response data: {data}")
-                
-                # Set token data
+
+                # Check if 2FA is required
+                if data.get('requires_2fa'):
+                    print("=== 2FA Required ===")
+                    # Store 2FA session data
+                    self.pending_2fa_session = {
+                        'session_token': data.get('session_token'),
+                        'user_id': data.get('user_id'),
+                        'has_recovery_email': data.get('has_recovery_email', False),
+                    }
+                    return False, "Two-factor authentication required.", {
+                        'requires_2fa': True,
+                        'session_token': data.get('session_token'),
+                        'has_recovery_email': data.get('has_recovery_email', False),
+                    }
+
+                # No 2FA required - proceed with normal login
                 self.token = data.get('token')
                 self.user_info = data.get('user')
                 self.companies = data.get('companies', [])
-                
+
                 print(f"Token received: {self.token[:20]}..." if self.token else "No token received")
                 print(f"User info: {self.user_info}")
                 print(f"Companies received: {len(self.companies) if self.companies else 0} companies")
                 if self.companies:
                     print(f"Companies list: {[c.get('name', 'Unknown') for c in self.companies]}")
-                
-                # Set token expiry (5 days from now, default Knox TTL)
-                self.token_expiry = datetime.datetime.now() + datetime.timedelta(days=5)
-                
+
+                # Set token expiry (use server-provided or default to 30 days)
+                expiry_str = data.get('expiry')
+                if expiry_str:
+                    try:
+                        self.token_expiry = datetime.datetime.fromisoformat(
+                            expiry_str.replace('Z', '+00:00')
+                        )
+                    except (ValueError, AttributeError):
+                        self.token_expiry = datetime.datetime.now() + datetime.timedelta(days=30)
+                else:
+                    self.token_expiry = datetime.datetime.now() + datetime.timedelta(days=30)
+
                 # Save token if requested
                 if save_token and token_password:
                     if not self._save_token(token_password):
                         print("WARNING: Failed to save token")
-                        return True, "Logged in successfully, but failed to save token."
-                
+                        return True, "Logged in successfully, but failed to save token.", None
+
+                # Clear pending credentials
+                self._pending_save_token = False
+                self._pending_token_password = None
+
                 print("=== Login successful ===\n")
-                return True, "Logged in successfully."
+                return True, "Logged in successfully.", None
             else:
                 # Login failed
                 print(f"Login failed with status code: {response.status_code}")
@@ -341,21 +399,244 @@ class GeoDBAPIClient:
                 except:
                     error_msg = response.text or 'Unknown error'
                 print(f"=== Login failed ===\n")
-                return False, f"Login failed: {error_msg}"
+                return False, f"Login failed: {error_msg}", None
         except requests.RequestException as e:
             # Network error
             print(f"Network error during login: {type(e).__name__}: {str(e)}")
             import traceback
             traceback.print_exc()
             print(f"=== Login failed (network error) ===\n")
-            return False, f"Network error: {str(e)}"
+            return False, f"Network error: {str(e)}", None
         except Exception as e:
             # Other error
             print(f"Unexpected error during login: {type(e).__name__}: {str(e)}")
             import traceback
             traceback.print_exc()
             print(f"=== Login failed (unexpected error) ===\n")
+            return False, f"Error: {str(e)}", None
+
+    def verify_2fa(self, code: str) -> Tuple[bool, str]:
+        """Verify 2FA code and complete login.
+
+        Args:
+            code: The 6-digit TOTP code from the authenticator app.
+
+        Returns:
+            A tuple of (success, message).
+        """
+        if not self.pending_2fa_session:
+            return False, "No pending 2FA session. Please log in again."
+
+        session_token = self.pending_2fa_session.get('session_token')
+        if not session_token:
+            return False, "Invalid 2FA session. Please log in again."
+
+        print(f"\n=== 2FA Verification ===")
+        print(f"API URL: {self.verify_2fa_url}")
+
+        try:
+            # Send 2FA verification request
+            response = self.session.post(
+                self.verify_2fa_url,
+                json={
+                    'session_token': session_token,
+                    'code': code,
+                },
+                headers={'Content-Type': 'application/json'},
+                timeout=10.0,
+            )
+
+            print(f"Response status code: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                print(f"2FA verification successful")
+
+                # Set token data
+                self.token = data.get('token')
+                self.companies = data.get('companies', [])
+
+                # Set token expiry
+                expiry_str = data.get('expiry')
+                if expiry_str:
+                    try:
+                        self.token_expiry = datetime.datetime.fromisoformat(
+                            expiry_str.replace('Z', '+00:00')
+                        )
+                    except (ValueError, AttributeError):
+                        self.token_expiry = datetime.datetime.now() + datetime.timedelta(days=30)
+                else:
+                    self.token_expiry = datetime.datetime.now() + datetime.timedelta(days=30)
+
+                # Clear 2FA session
+                self.pending_2fa_session = None
+
+                # Save token if originally requested
+                if getattr(self, '_pending_save_token', False) and getattr(self, '_pending_token_password', None):
+                    if not self._save_token(self._pending_token_password):
+                        print("WARNING: Failed to save token")
+                        self._pending_save_token = False
+                        self._pending_token_password = None
+                        return True, "Logged in successfully, but failed to save token."
+
+                # Clear pending credentials
+                self._pending_save_token = False
+                self._pending_token_password = None
+
+                print("=== 2FA verification successful ===\n")
+                return True, "Logged in successfully."
+            else:
+                # Verification failed
+                print(f"2FA verification failed with status code: {response.status_code}")
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', error_data.get('detail', 'Invalid code'))
+                    print(f"Error data: {error_data}")
+                except:
+                    error_msg = 'Invalid code'
+                print(f"=== 2FA verification failed ===\n")
+                return False, error_msg
+        except requests.RequestException as e:
+            print(f"Network error during 2FA verification: {type(e).__name__}: {str(e)}")
+            return False, f"Network error: {str(e)}"
+        except Exception as e:
+            print(f"Error during 2FA verification: {type(e).__name__}: {str(e)}")
             return False, f"Error: {str(e)}"
+
+    def request_2fa_recovery(self) -> Tuple[bool, str, Optional[str]]:
+        """Request a recovery code to be sent to the user's recovery email.
+
+        Returns:
+            A tuple of (success, message, masked_email).
+            masked_email is the partially masked recovery email address (e.g., j***@example.com)
+        """
+        if not self.pending_2fa_session:
+            return False, "No pending 2FA session. Please log in again.", None
+
+        session_token = self.pending_2fa_session.get('session_token')
+        if not session_token:
+            return False, "Invalid 2FA session. Please log in again.", None
+
+        print(f"\n=== 2FA Recovery Request ===")
+        print(f"API URL: {self.request_2fa_recovery_url}")
+
+        try:
+            response = self.session.post(
+                self.request_2fa_recovery_url,
+                json={'session_token': session_token},
+                headers={'Content-Type': 'application/json'},
+                timeout=10.0,
+            )
+
+            print(f"Response status code: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                masked_email = data.get('recovery_email_masked', '')
+                print(f"Recovery code sent to: {masked_email}")
+                return True, data.get('message', 'Recovery code sent'), masked_email
+            else:
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', error_data.get('detail', 'Failed to send recovery code'))
+                except:
+                    error_msg = 'Failed to send recovery code'
+                return False, error_msg, None
+        except requests.RequestException as e:
+            return False, f"Network error: {str(e)}", None
+        except Exception as e:
+            return False, f"Error: {str(e)}", None
+
+    def verify_2fa_recovery(self, recovery_code: str) -> Tuple[bool, str]:
+        """Verify recovery code and complete login.
+
+        Args:
+            recovery_code: The 6-digit recovery code sent to the user's email.
+
+        Returns:
+            A tuple of (success, message).
+        """
+        if not self.pending_2fa_session:
+            return False, "No pending 2FA session. Please log in again."
+
+        session_token = self.pending_2fa_session.get('session_token')
+        if not session_token:
+            return False, "Invalid 2FA session. Please log in again."
+
+        print(f"\n=== 2FA Recovery Verification ===")
+        print(f"API URL: {self.verify_2fa_recovery_url}")
+
+        try:
+            response = self.session.post(
+                self.verify_2fa_recovery_url,
+                json={
+                    'session_token': session_token,
+                    'recovery_code': recovery_code,
+                },
+                headers={'Content-Type': 'application/json'},
+                timeout=10.0,
+            )
+
+            print(f"Response status code: {response.status_code}")
+
+            if response.status_code == 200:
+                data = response.json()
+                print(f"Recovery verification successful")
+
+                # Set token data
+                self.token = data.get('token')
+                self.companies = data.get('companies', [])
+
+                # Set token expiry
+                expiry_str = data.get('expiry')
+                if expiry_str:
+                    try:
+                        self.token_expiry = datetime.datetime.fromisoformat(
+                            expiry_str.replace('Z', '+00:00')
+                        )
+                    except (ValueError, AttributeError):
+                        self.token_expiry = datetime.datetime.now() + datetime.timedelta(days=30)
+                else:
+                    self.token_expiry = datetime.datetime.now() + datetime.timedelta(days=30)
+
+                # Clear 2FA session
+                self.pending_2fa_session = None
+
+                # Save token if originally requested
+                if getattr(self, '_pending_save_token', False) and getattr(self, '_pending_token_password', None):
+                    if not self._save_token(self._pending_token_password):
+                        print("WARNING: Failed to save token")
+                        self._pending_save_token = False
+                        self._pending_token_password = None
+                        return True, "Logged in successfully, but failed to save token."
+
+                # Clear pending credentials
+                self._pending_save_token = False
+                self._pending_token_password = None
+
+                print("=== Recovery verification successful ===\n")
+                return True, "Logged in successfully."
+            else:
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('error', error_data.get('detail', 'Invalid or expired recovery code'))
+                except:
+                    error_msg = 'Invalid or expired recovery code'
+                return False, error_msg
+        except requests.RequestException as e:
+            return False, f"Network error: {str(e)}"
+        except Exception as e:
+            return False, f"Error: {str(e)}"
+
+    def cancel_2fa(self):
+        """Cancel the pending 2FA session."""
+        self.pending_2fa_session = None
+        self._pending_save_token = False
+        self._pending_token_password = None
+
+    def has_pending_2fa(self) -> bool:
+        """Check if there's a pending 2FA verification."""
+        return self.pending_2fa_session is not None
     
     def check_token(self) -> Tuple[bool, str]:
         """Check if the current token is valid.
@@ -473,6 +754,51 @@ class GeoDBAPIClient:
         """
         return self.token_expiry
     
+    def set_active_company(self, company_id: int) -> Tuple[bool, str]:
+        """Set the user's active company in the app.
+
+        This notifies the server that the user has selected a company,
+        which updates their active company across all geoDB apps.
+
+        Args:
+            company_id: ID of the company to make active.
+
+        Returns:
+            A tuple of (success, message).
+        """
+        success, result = self.make_request(
+            'POST',
+            'me/set-active-company/',
+            data={'company_id': company_id}
+        )
+        if success:
+            return True, "Active company set successfully."
+        else:
+            return False, result if isinstance(result, str) else "Failed to set active company."
+
+    def set_active_project(self, project_id: int) -> Tuple[bool, str]:
+        """Set the user's active project in the app.
+
+        This notifies the server that the user has selected a project,
+        which updates their active project across all geoDB apps.
+        The active company is also automatically set to the project's parent company.
+
+        Args:
+            project_id: ID of the project to make active.
+
+        Returns:
+            A tuple of (success, message).
+        """
+        success, result = self.make_request(
+            'POST',
+            'me/set-active-project/',
+            data={'project_id': project_id}
+        )
+        if success:
+            return True, "Active project set successfully."
+        else:
+            return False, result if isinstance(result, str) else "Failed to set active project."
+
     def make_request(self, method: str, endpoint: str, data: Optional[Dict[str, Any]] = None,
                     params: Optional[Dict[str, Any]] = None) -> Tuple[bool, Union[Dict[str, Any], str]]:
         """Make a request to the geoDB API.
@@ -551,3 +877,206 @@ class GeoDBAPIClient:
             import traceback
             traceback.print_exc()
             return False, f"Error: {str(e)}"
+
+    def get_all_paginated(self, endpoint: str, params: Optional[Dict[str, Any]] = None,
+                          progress_callback: Optional[Callable[[int, int], None]] = None,
+                          limit: int = 100) -> Tuple[bool, List[Dict[str, Any]]]:
+        """
+        Fetch ALL results from a paginated v2 API endpoint by following pagination.
+
+        The v2 API uses LimitOffsetPagination with response format:
+        {
+            "count": 5000,
+            "next": "https://api.geodb.io/api/v2/drill-collars/?limit=100&offset=100",
+            "previous": null,
+            "results": [...]
+        }
+
+        Args:
+            endpoint: API endpoint (e.g., 'drill-collars/')
+            params: Query parameters (e.g., {'project_id': 123})
+            progress_callback: Optional callback(fetched_count, total_count) for progress updates
+            limit: Number of results per page (default 100, max 1000)
+
+        Returns:
+            Tuple of (success, list_of_all_results)
+        """
+        if not self.token:
+            print("ERROR: get_all_paginated called without token")
+            return False, []
+
+        all_results = []
+        params = params.copy() if params else {}
+        params['limit'] = min(limit, 1000)  # Respect max limit
+
+        current_offset = 0
+        total_count = None
+
+        print(f"\n=== Paginated Fetch: {endpoint} ===")
+
+        while True:
+            params['offset'] = current_offset
+            success, data = self.make_request('GET', endpoint, params=params)
+
+            if not success:
+                print(f"[geoDB] Pagination failed at offset {current_offset}: {data}")
+                return False, all_results
+
+            # Handle paginated response (v2 API format)
+            if isinstance(data, dict) and 'results' in data:
+                results = data.get('results', [])
+                all_results.extend(results)
+
+                # Get total count on first request
+                if total_count is None:
+                    total_count = data.get('count', len(results))
+                    print(f"[geoDB] Total records to fetch: {total_count}")
+
+                # Progress callback
+                if progress_callback and total_count:
+                    progress_callback(len(all_results), total_count)
+
+                # Log progress
+                print(f"[geoDB] Fetched {len(all_results)}/{total_count} records")
+
+                # Check if more pages exist
+                if data.get('next') is None:
+                    break
+
+                current_offset += len(results)
+
+                # Safety check to prevent infinite loops
+                if len(results) == 0:
+                    print("[geoDB] Empty page received, stopping pagination")
+                    break
+            else:
+                # Non-paginated response (shouldn't happen with v2, but handle gracefully)
+                if isinstance(data, list):
+                    all_results.extend(data)
+                    print(f"[geoDB] Received non-paginated list with {len(data)} items")
+                break
+
+        print(f"[geoDB] Pagination complete: {len(all_results)} total records fetched")
+        return True, all_results
+
+    def get_all_paginated_with_sync(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        limit: int = 100
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Fetch ALL results from a paginated v2 API endpoint with sync metadata.
+
+        Similar to get_all_paginated() but also returns deleted_ids and sync_timestamp
+        for deletion sync support. This enables clients to detect records that were
+        soft-deleted on the server and remove them from local cache/scene.
+
+        The v2 API response format with sync support:
+        {
+            "count": 5000,
+            "next": "...",
+            "previous": null,
+            "results": [...],
+            "deleted_ids": [45, 67, 89, 123],  // IDs of soft-deleted records
+            "deleted_since_applied": "2026-01-10T15:30:00Z",  // Echo of filter param
+            "sync_timestamp": "2026-01-12T10:00:00Z"  // Use for next sync
+        }
+
+        Args:
+            endpoint: API endpoint (e.g., 'drill-collars/')
+            params: Query parameters (e.g., {'project_id': 123, 'deleted_since': '...'})
+            progress_callback: Optional callback(fetched_count, total_count) for progress
+            limit: Number of results per page (default 100, max 1000)
+
+        Returns:
+            Tuple of (success, result_dict) where result_dict contains:
+                - results: List of all active records
+                - deleted_ids: List of soft-deleted record IDs (empty if not supported)
+                - sync_timestamp: ISO timestamp for next sync (None if not supported)
+                - count: Total active record count
+        """
+        if not self.token:
+            print("ERROR: get_all_paginated_with_sync called without token")
+            return False, {'results': [], 'deleted_ids': [], 'sync_timestamp': None, 'count': 0}
+
+        all_results = []
+        all_deleted_ids = set()  # Use set to handle duplicates across pages
+        sync_timestamp = None
+        params = params.copy() if params else {}
+        params['limit'] = min(limit, 1000)
+
+        current_offset = 0
+        total_count = None
+
+        print(f"\n=== Paginated Fetch with Sync: {endpoint} ===")
+        if params.get('deleted_since'):
+            print(f"Incremental sync from: {params.get('deleted_since')}")
+
+        while True:
+            params['offset'] = current_offset
+            success, data = self.make_request('GET', endpoint, params=params)
+
+            if not success:
+                print(f"[geoDB] Pagination failed at offset {current_offset}: {data}")
+                return False, {
+                    'results': all_results,
+                    'deleted_ids': list(all_deleted_ids),
+                    'sync_timestamp': sync_timestamp,
+                    'count': len(all_results)
+                }
+
+            # Handle paginated response (v2 API format)
+            if isinstance(data, dict) and 'results' in data:
+                results = data.get('results', [])
+                all_results.extend(results)
+
+                # Collect sync metadata (new fields - gracefully handle if missing)
+                deleted_ids_page = data.get('deleted_ids', [])
+                if deleted_ids_page:
+                    all_deleted_ids.update(deleted_ids_page)
+
+                # Use the latest sync_timestamp (should be same across pages)
+                page_sync_timestamp = data.get('sync_timestamp')
+                if page_sync_timestamp:
+                    sync_timestamp = page_sync_timestamp
+
+                # Get total count on first request
+                if total_count is None:
+                    total_count = data.get('count', len(results))
+                    print(f"[geoDB] Total records to fetch: {total_count}")
+
+                # Progress callback
+                if progress_callback and total_count:
+                    progress_callback(len(all_results), total_count)
+
+                # Log progress
+                print(f"[geoDB] Fetched {len(all_results)}/{total_count} records, "
+                      f"deleted_ids so far: {len(all_deleted_ids)}")
+
+                # Check if more pages exist
+                if data.get('next') is None:
+                    break
+
+                current_offset += len(results)
+
+                # Safety check to prevent infinite loops
+                if len(results) == 0:
+                    print("[geoDB] Empty page received, stopping pagination")
+                    break
+            else:
+                # Non-paginated response (shouldn't happen with v2)
+                if isinstance(data, list):
+                    all_results.extend(data)
+                break
+
+        print(f"[geoDB] Pagination complete: {len(all_results)} records, "
+              f"{len(all_deleted_ids)} deleted_ids, sync_timestamp: {sync_timestamp}")
+
+        return True, {
+            'results': all_results,
+            'deleted_ids': list(all_deleted_ids),
+            'sync_timestamp': sync_timestamp,
+            'count': len(all_results)
+        }
