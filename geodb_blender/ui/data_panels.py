@@ -115,7 +115,7 @@ class GEODB_OT_SelectCompany(Operator):
     def execute(self, context):
         # Store selected company in scene properties
         context.scene.geodb.selected_company_id = self.company_id
-        
+
         # Get company name from cache (DO NOT make API calls here!)
         global _dropdown_cache
         if _dropdown_cache['companies']:
@@ -126,24 +126,37 @@ class GEODB_OT_SelectCompany(Operator):
                     break
         else:
             print("WARNING: No cached companies found for name lookup")
-        
+
         # Clear project and drill hole selection
         context.scene.geodb.selected_project_id = ""
         context.scene.geodb.selected_project_code = ""
         context.scene.geodb.selected_project_name = ""
         context.scene.geodb.selected_drill_hole_id = ""
         context.scene.geodb.selected_drill_hole_name = ""
-        
+
+        # Notify the server of the active company selection (like the QGIS plugin does)
+        from ..api.auth import get_api_client
+        client = get_api_client()
+        try:
+            company_id_int = int(self.company_id)
+            success, msg = client.set_active_company(company_id_int)
+            if success:
+                print(f"Set active company on server: {company_id_int}")
+            else:
+                print(f"WARNING: Failed to set active company on server: {msg}")
+        except (ValueError, Exception) as e:
+            print(f"WARNING: Could not set active company on server: {e}")
+
         # Do NOT pre-load projects here - it blocks the UI!
         # Projects will be loaded when user clicks "Select Project" button
         print(f"Company selected. Projects will be loaded when needed.")
-        
+
         # Force UI redraw
         for window in context.window_manager.windows:
             for area in window.screen.areas:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()
-        
+
         self.report({'INFO'}, f"Selected company: {context.scene.geodb.selected_company_name}")
         return {'FINISHED'}
 
@@ -336,20 +349,20 @@ class GEODB_OT_SelectProject(Operator):
     def execute(self, context):
         print(f"\n=== SelectProject Operator Execute ===")
         print(f"Selected project_id: {self.project_id}")
-        
+
         if self.project_id == "0":
             self.report({'WARNING'}, "No valid project selected")
             return {'CANCELLED'}
-        
+
         try:
             # Store selected project in scene properties
             context.scene.geodb.selected_project_id = self.project_id
             print(f"Stored project_id in scene properties")
-            
+
             # Get project name from cache (DO NOT make API calls here!)
             company_id = context.scene.geodb.selected_company_id
             print(f"Company ID from scene: {company_id}")
-            
+
             # Look up project name and code from cache only
             global _dropdown_cache, _project_data_cache
             company_id_int = int(company_id)
@@ -370,22 +383,35 @@ class GEODB_OT_SelectProject(Operator):
                         break
             else:
                 print("WARNING: No cached projects found for name lookup")
-            
+
             # Clear drill hole selection
             context.scene.geodb.selected_drill_hole_id = ""
             context.scene.geodb.selected_drill_hole_name = ""
             print("Cleared drill hole selection")
-            
+
+            # Notify the server of the active project selection (like the QGIS plugin does)
+            from ..api.auth import get_api_client
+            client = get_api_client()
+            try:
+                project_id_int = int(self.project_id)
+                success, msg = client.set_active_project(project_id_int)
+                if success:
+                    print(f"Set active project on server: {project_id_int}")
+                else:
+                    print(f"WARNING: Failed to set active project on server: {msg}")
+            except (ValueError, Exception) as e:
+                print(f"WARNING: Could not set active project on server: {e}")
+
             # Do NOT pre-load drill holes here - it blocks the UI!
             # Drill holes will be loaded when user clicks "Select Drill Hole" button
             print("Drill holes will be loaded when needed")
-            
+
             # Force UI redraw
             for window in context.window_manager.windows:
                 for area in window.screen.areas:
                     if area.type == 'VIEW_3D':
                         area.tag_redraw()
-            
+
             print("Execute completed successfully")
             self.report({'INFO'}, f"Selected project: {context.scene.geodb.selected_project_name}")
             return {'FINISHED'}

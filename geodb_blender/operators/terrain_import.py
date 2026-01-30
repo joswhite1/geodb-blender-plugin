@@ -226,6 +226,11 @@ class GEODB_OT_ImportTerrain(GeoDBAsyncOperator):
             texture_type = 'none'
 
             # Find selected texture from cache
+            print(f"DEBUG: selected_texture value = '{self.selected_texture}'")
+            print(f"DEBUG: available_textures_cache has {len(_available_textures_cache)} items:")
+            for i, tex in enumerate(_available_textures_cache):
+                print(f"DEBUG:   [{i}] id={tex.get('id')}, name={tex.get('name')}, url={tex.get('url', 'NO URL')[:80] if tex.get('url') else 'NO URL'}...")
+
             if self.selected_texture and self.selected_texture not in ('none', 'unavailable'):
                 for tex in _available_textures_cache:
                     if str(tex.get('id', '')) == self.selected_texture:
@@ -233,6 +238,7 @@ class GEODB_OT_ImportTerrain(GeoDBAsyncOperator):
                         texture_name = tex.get('name', 'Unknown')
                         texture_type = tex.get('type', 'custom')
                         self._status = f"Downloading {texture_name}..."
+                        print(f"DEBUG: Found matching texture! url={texture_url[:80] if texture_url else 'NO URL'}...")
                         break
 
             if not texture_url and self.selected_texture not in ('none', 'unavailable'):
@@ -285,9 +291,16 @@ class GEODB_OT_ImportTerrain(GeoDBAsyncOperator):
         """
         import requests
 
-        # Check if this is a pre-signed URL (contains AWS signature params)
+        # Check if this is a pre-signed URL (contains AWS or Azure signature params)
         # Pre-signed URLs already have authentication baked in
-        is_presigned = 'AWSAccessKeyId=' in url or 'Signature=' in url or 'X-Amz-Signature=' in url
+        # AWS uses: AWSAccessKeyId, Signature, X-Amz-Signature
+        # Azure uses: sig, se, sp, sv, sr
+        is_presigned = (
+            'AWSAccessKeyId=' in url or
+            'Signature=' in url or
+            'X-Amz-Signature=' in url or
+            'sig=' in url  # Azure Blob Storage pre-signed URL
+        )
 
         # If relative URL, prepend base URL and use authentication
         if url.startswith('/'):
@@ -402,12 +415,38 @@ class GEODB_OT_ImportTerrain(GeoDBAsyncOperator):
 
             # Apply texture if downloaded
             texture_path = self._data.get('texture_local_path')
-            if texture_path and os.path.exists(texture_path):
-                self._apply_terrain_texture(obj, texture_path)
+            print(f"DEBUG: texture_path = {texture_path}")
+            if texture_path:
+                file_exists = os.path.exists(texture_path)
+                file_size = os.path.getsize(texture_path) if file_exists else 0
+                print(f"DEBUG: texture_path exists = {file_exists}, size = {file_size} bytes")
+            else:
+                print(f"DEBUG: texture_path is None")
 
-                # Set viewport shading to Solid with Texture color type
-                # This makes the texture visible without user having to change settings
-                self._set_viewport_texture_display(context)
+            if texture_path and os.path.exists(texture_path):
+                file_size = os.path.getsize(texture_path)
+                if file_size < 100:
+                    print(f"ERROR: Texture file is too small ({file_size} bytes), likely corrupt or empty")
+                else:
+                    try:
+                        self._apply_terrain_texture(obj, texture_path)
+                        print(f"DEBUG: Material applied successfully")
+                        print(f"DEBUG: obj.data.materials count = {len(obj.data.materials)}")
+                        for i, mat in enumerate(obj.data.materials):
+                            print(f"DEBUG:   Material[{i}] = {mat.name if mat else 'None'}")
+                    except Exception as e:
+                        print(f"ERROR: Failed to apply texture: {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                    # Set viewport shading to Solid with Texture color type
+                    # This makes the texture visible without user having to change settings
+                    self._set_viewport_texture_display(context)
+            else:
+                print(f"DEBUG: Texture not applied - path missing or file doesn't exist")
+
+            # Force depsgraph update to ensure all changes (including materials) are visible
+            context.view_layer.depsgraph.update()
 
             # Select the new terrain object
             obj.select_set(True)
@@ -535,12 +574,19 @@ class GEODB_OT_ImportTerrain(GeoDBAsyncOperator):
         links.new(node_bsdf.outputs['BSDF'], node_output.inputs['Surface'])
 
         # Apply material to mesh
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-        else:
-            obj.data.materials.append(mat)
+        # Clear existing materials first for clean assignment
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
+
+        # Force mesh update to ensure material is registered
+        obj.data.update()
+
+        # Tag object for depsgraph update (required in Blender 4.x/5.x)
+        obj.update_tag(refresh={'OBJECT', 'DATA'})
 
         print(f"Applied texture material to terrain: {img.name}")
+        print(f"Material slots on object: {len(obj.material_slots)}")
+        print(f"Materials on mesh data: {len(obj.data.materials)}")
 
 
 # Cache for switch texture operator (populated from mesh object properties)
@@ -743,9 +789,16 @@ class GEODB_OT_SwitchTerrainTexture(GeoDBAsyncOperator):
         """Download texture image to temp file."""
         import requests
 
-        # Check if this is a pre-signed URL (contains AWS signature params)
+        # Check if this is a pre-signed URL (contains AWS or Azure signature params)
         # Pre-signed URLs already have authentication baked in
-        is_presigned = 'AWSAccessKeyId=' in url or 'Signature=' in url or 'X-Amz-Signature=' in url
+        # AWS uses: AWSAccessKeyId, Signature, X-Amz-Signature
+        # Azure uses: sig, se, sp, sv, sr
+        is_presigned = (
+            'AWSAccessKeyId=' in url or
+            'Signature=' in url or
+            'X-Amz-Signature=' in url or
+            'sig=' in url  # Azure Blob Storage pre-signed URL
+        )
 
         # If relative URL, prepend base URL and use authentication
         if url.startswith('/'):
@@ -818,6 +871,9 @@ class GEODB_OT_SwitchTerrainTexture(GeoDBAsyncOperator):
                     obj['geodb_active_texture_name'] = texture_name
                 self.report({'INFO'}, f"Applied {texture_name or texture_type} texture to terrain")
 
+            # Force depsgraph update to ensure material changes are visible
+            context.view_layer.depsgraph.update()
+
         except Exception as e:
             raise Exception(f"Error applying texture: {str(e)}")
 
@@ -852,10 +908,12 @@ class GEODB_OT_SwitchTerrainTexture(GeoDBAsyncOperator):
             links.new(node_bsdf.outputs['BSDF'], node_output.inputs['Surface'])
 
         # Apply material to mesh
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-        else:
-            obj.data.materials.append(mat)
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
+
+        # Force mesh update
+        obj.data.update()
+        obj.update_tag(refresh={'OBJECT', 'DATA'})
 
         print("Applied plain material to terrain")
 
@@ -951,9 +1009,11 @@ class GEODB_OT_SwitchTerrainTexture(GeoDBAsyncOperator):
         links.new(node_bsdf.outputs['BSDF'], node_output.inputs['Surface'])
 
         # Apply material to mesh
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-        else:
-            obj.data.materials.append(mat)
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
+
+        # Force mesh update
+        obj.data.update()
+        obj.update_tag(refresh={'OBJECT', 'DATA'})
 
         print(f"Applied {texture_type} texture material to terrain: {img.name}")

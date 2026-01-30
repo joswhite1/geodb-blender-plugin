@@ -2,15 +2,19 @@
 Authentication module for the geoDB Blender add-on.
 
 This module handles user authentication with the geoDB API,
-including login, token management, and secure credential storage.
+including login, token management, secure credential storage,
+and two-factor authentication (2FA).
 """
 
 import bpy
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy.types import Operator, Panel
 
 from .client import GeoDBAPIClient
 from .. import is_dev_mode_enabled
+
+# Global state for 2FA flow
+_pending_2fa_has_recovery_email = False
 
 # Global API client instance
 api_client = None
@@ -105,17 +109,19 @@ class GEODB_OT_Login(Operator):
             layout.label(text="in future sessions. It is not sent to the server.")
     
     def execute(self, context):
+        global _pending_2fa_has_recovery_email
+
         # Validate inputs
         if not self.username or not self.password:
             print("ERROR: Email and password are required")
             self.report({'ERROR'}, "Email and password are required")
             return {'CANCELLED'}
-        
+
         if self.save_credentials and not self.token_password:
             print("ERROR: Encryption password is required when saving credentials")
             self.report({'ERROR'}, "Encryption password is required when saving credentials")
             return {'CANCELLED'}
-        
+
         # Get API client
         try:
             client = get_api_client()
@@ -126,10 +132,10 @@ class GEODB_OT_Login(Operator):
             traceback.print_exc()
             self.report({'ERROR'}, f"Failed to initialize API client: {str(e)}")
             return {'CANCELLED'}
-        
+
         # Attempt login
         try:
-            success, message = client.login(
+            success, message, extra_data = client.login(
                 username=self.username,
                 password=self.password,
                 save_token=self.save_credentials,
@@ -141,7 +147,23 @@ class GEODB_OT_Login(Operator):
             traceback.print_exc()
             self.report({'ERROR'}, f"Login error: {str(e)}")
             return {'CANCELLED'}
-        
+
+        # Check if 2FA is required
+        if extra_data and extra_data.get('requires_2fa'):
+            print("2FA required - opening verification dialog")
+            # Store whether recovery email is available
+            _pending_2fa_has_recovery_email = extra_data.get('has_recovery_email', False)
+
+            # Clear sensitive data
+            self.username = ""
+            self.password = ""
+            self.token_password = ""
+
+            # Open 2FA verification dialog
+            self.report({'INFO'}, "Two-factor authentication required")
+            bpy.ops.geodb.verify_2fa('INVOKE_DEFAULT')
+            return {'FINISHED'}
+
         if success:
             print(f"SUCCESS: {message}")
             # Store user info in scene properties
@@ -149,18 +171,18 @@ class GEODB_OT_Login(Operator):
             user_info = client.get_user_info()
             if user_info:
                 context.scene.geodb.username = user_info.get('username', '')
-            
+
             # Clear sensitive data
             self.username = ""
             self.password = ""
             self.token_password = ""
-            
+
             # Force UI redraw to show login status immediately
             for window in context.window_manager.windows:
                 for area in window.screen.areas:
                     if area.type == 'VIEW_3D':
                         area.tag_redraw()
-            
+
             self.report({'INFO'}, message)
             return {'FINISHED'}
         else:
@@ -265,6 +287,167 @@ class GEODB_OT_UnlockToken(Operator):
             self.report({'ERROR'}, "Failed to unlock token. Incorrect password or token is corrupted.")
             return {'CANCELLED'}
 
+class GEODB_OT_Verify2FA(Operator):
+    """Verify two-factor authentication code"""
+    bl_idname = "geodb.verify_2fa"
+    bl_label = "Two-Factor Authentication"
+    bl_description = "Enter your 2FA code from your authenticator app"
+
+    code: StringProperty(
+        name="Authentication Code",
+        description="Enter the 6-digit code from your authenticator app",
+        maxlen=6,
+    )
+
+    verification_mode: EnumProperty(
+        name="Verification Mode",
+        items=[
+            ('TOTP', "Authenticator App", "Use code from your authenticator app"),
+            ('RECOVERY', "Recovery Email", "Request a code via your recovery email"),
+        ],
+        default='TOTP',
+    )
+
+    recovery_code: StringProperty(
+        name="Recovery Code",
+        description="Enter the 6-digit code sent to your recovery email",
+        maxlen=6,
+    )
+
+    _recovery_email_masked: str = ""
+    _recovery_requested: bool = False
+    _error_message: str = ""
+
+    def invoke(self, context, event):
+        # Reset state
+        self._recovery_email_masked = ""
+        self._recovery_requested = False
+        self._error_message = ""
+        self.code = ""
+        self.recovery_code = ""
+        self.verification_mode = 'TOTP'
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        global _pending_2fa_has_recovery_email
+        layout = self.layout
+
+        # Show error message if any
+        if self._error_message:
+            box = layout.box()
+            box.alert = True
+            box.label(text=self._error_message, icon='ERROR')
+
+        # Show verification mode selector only if recovery email is available
+        if _pending_2fa_has_recovery_email:
+            layout.prop(self, "verification_mode", expand=True)
+            layout.separator()
+
+        if self.verification_mode == 'TOTP':
+            layout.label(text="Enter the 6-digit code from your authenticator app:")
+            layout.prop(self, "code")
+            layout.label(text="Open Google Authenticator, Authy, or similar app", icon='INFO')
+        else:
+            # Recovery mode
+            if not self._recovery_requested:
+                layout.label(text="Click 'Send Recovery Code' to receive a code via email.")
+                layout.operator("geodb.request_2fa_recovery", text="Send Recovery Code", icon='EXPORT')
+            else:
+                if self._recovery_email_masked:
+                    layout.label(text=f"Code sent to: {self._recovery_email_masked}", icon='CHECKMARK')
+                layout.label(text="Enter the 6-digit code from your email:")
+                layout.prop(self, "recovery_code")
+
+        layout.separator()
+        layout.operator("geodb.cancel_2fa", text="Cancel", icon='X')
+
+    def execute(self, context):
+        client = get_api_client()
+
+        if self.verification_mode == 'TOTP':
+            # Verify TOTP code
+            if not self.code or len(self.code) != 6:
+                self._error_message = "Please enter a 6-digit code"
+                return context.window_manager.invoke_props_dialog(self, width=400)
+
+            success, message = client.verify_2fa(self.code)
+        else:
+            # Verify recovery code
+            if not self.recovery_code or len(self.recovery_code) != 6:
+                self._error_message = "Please enter a 6-digit recovery code"
+                return context.window_manager.invoke_props_dialog(self, width=400)
+
+            success, message = client.verify_2fa_recovery(self.recovery_code)
+
+        if success:
+            # Login successful
+            context.scene.geodb.is_logged_in = True
+            user_info = client.get_user_info()
+            if user_info:
+                context.scene.geodb.username = user_info.get('username', '')
+
+            # Force UI redraw
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
+
+            self.report({'INFO'}, message)
+            return {'FINISHED'}
+        else:
+            # Verification failed - show error and let user retry
+            self._error_message = message
+            self.code = ""
+            self.recovery_code = ""
+            return context.window_manager.invoke_props_dialog(self, width=400)
+
+
+class GEODB_OT_Request2FARecovery(Operator):
+    """Request a 2FA recovery code via email"""
+    bl_idname = "geodb.request_2fa_recovery"
+    bl_label = "Send Recovery Code"
+    bl_description = "Send a recovery code to your registered recovery email"
+
+    def execute(self, context):
+        client = get_api_client()
+        success, message, masked_email = client.request_2fa_recovery()
+
+        if success:
+            # Update the verify dialog state
+            # We need to re-invoke the dialog with updated state
+            self.report({'INFO'}, f"Recovery code sent to {masked_email}")
+
+            # Store the masked email for display
+            GEODB_OT_Verify2FA._recovery_email_masked = masked_email or ""
+            GEODB_OT_Verify2FA._recovery_requested = True
+            GEODB_OT_Verify2FA._error_message = ""
+
+            # Re-open the dialog
+            bpy.ops.geodb.verify_2fa('INVOKE_DEFAULT')
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+
+
+class GEODB_OT_Cancel2FA(Operator):
+    """Cancel the 2FA verification process"""
+    bl_idname = "geodb.cancel_2fa"
+    bl_label = "Cancel 2FA"
+    bl_description = "Cancel the two-factor authentication process"
+
+    def execute(self, context):
+        client = get_api_client()
+        client.cancel_2fa()
+
+        # Reset global state
+        global _pending_2fa_has_recovery_email
+        _pending_2fa_has_recovery_email = False
+
+        self.report({'INFO'}, "2FA verification cancelled")
+        return {'FINISHED'}
+
+
 class GEODB_OT_ResetAPIClient(Operator):
     """Toggle between development and production server"""
     bl_idname = "geodb.reset_api_client"
@@ -335,31 +518,45 @@ class GEODB_PT_Authentication(Panel):
             # Show logged in status
             row = layout.row()
             row.label(text=f"Logged in as: {scene.geodb.username}")
-            
+
             # Show logout button
             layout.operator("geodb.logout", icon='X')
         else:
             # Check if there's a saved token
             client = get_api_client()
-            
-            if client.has_saved_token():
+
+            # Check if there's a pending 2FA verification
+            if client.has_pending_2fa():
+                box = layout.box()
+                box.label(text="2FA Verification Required", icon='LOCKED')
+                box.operator("geodb.verify_2fa", text="Enter 2FA Code", icon='KEY_HLT')
+                box.operator("geodb.cancel_2fa", text="Cancel", icon='X')
+            elif client.has_saved_token():
                 # Show unlock token button
                 layout.operator("geodb.unlock_token", icon='UNLOCKED')
                 layout.label(text="or")
-            
-            # Show login button
-            layout.operator("geodb.login", icon='USER')
+                # Show login button
+                layout.operator("geodb.login", icon='USER')
+            else:
+                # Show login button
+                layout.operator("geodb.login", icon='USER')
 
 def register():
     bpy.utils.register_class(GEODB_OT_Login)
     bpy.utils.register_class(GEODB_OT_Logout)
     bpy.utils.register_class(GEODB_OT_UnlockToken)
+    bpy.utils.register_class(GEODB_OT_Verify2FA)
+    bpy.utils.register_class(GEODB_OT_Request2FARecovery)
+    bpy.utils.register_class(GEODB_OT_Cancel2FA)
     bpy.utils.register_class(GEODB_OT_ResetAPIClient)
     bpy.utils.register_class(GEODB_PT_Authentication)
 
 def unregister():
     bpy.utils.unregister_class(GEODB_PT_Authentication)
     bpy.utils.unregister_class(GEODB_OT_ResetAPIClient)
+    bpy.utils.unregister_class(GEODB_OT_Cancel2FA)
+    bpy.utils.unregister_class(GEODB_OT_Request2FARecovery)
+    bpy.utils.unregister_class(GEODB_OT_Verify2FA)
     bpy.utils.unregister_class(GEODB_OT_UnlockToken)
     bpy.utils.unregister_class(GEODB_OT_Logout)
     bpy.utils.unregister_class(GEODB_OT_Login)

@@ -16,6 +16,7 @@ from bpy.props import EnumProperty, FloatProperty, IntProperty
 
 from ..api.data import GeoDBData
 from ..core.data_cache import DrillDataCache
+from ..core.config_cache import ConfigCache
 from ..utils.interval_visualization import (
     create_interval_tube,
     apply_material_to_interval
@@ -152,11 +153,14 @@ class GEODB_OT_LoadAssayConfig(Operator):
             self.report({'ERROR'}, "Please select a valid assay configuration")
             return {'CANCELLED'}
 
-        # Fetch config details
-        success, configs = GeoDBData.get_assay_range_configurations(project_id)
-        if not success or not configs:
-            self.report({'ERROR'}, "Failed to fetch assay configurations")
-            return {'CANCELLED'}
+        # Use cached configs from invoke() - no duplicate API call needed
+        configs = self.__class__._cached_configs
+        if not configs:
+            # Fallback: fetch from API if cache is empty (shouldn't happen normally)
+            success, configs = GeoDBData.get_assay_range_configurations(project_id)
+            if not success or not configs:
+                self.report({'ERROR'}, "Failed to fetch assay configurations")
+                return {'CANCELLED'}
 
         config = next((c for c in configs if c.get('id') == selected_config_id), None)
         if not config:
@@ -216,6 +220,9 @@ class GEODB_OT_LoadAssayConfig(Operator):
 
             # CACHE configs to avoid repeated API calls in draw()
             self.__class__._cached_configs = configs
+
+            # Also update ConfigCache for other components to use
+            ConfigCache.set_assay_configs(project_id, configs)
 
             # Load existing diameter overrides from scene
             import json
@@ -397,6 +404,7 @@ class GEODB_OT_LoadLithologyConfig(Operator):
     # Cache lithology types to avoid repeated API calls in draw()
     _cached_lithology_types = []
     _cached_set_id = 0
+    _cached_sets = []  # Cache the sets list from invoke()
 
     def execute(self, context):
         scene = context.scene
@@ -443,10 +451,10 @@ class GEODB_OT_LoadLithologyConfig(Operator):
 
         # Save selected set ID and name to scene properties
         props.selected_lithology_set_id = selected_set_id
-        # Get set name from the cached data
-        project_id = int(props.selected_project_id)
-        success, sets = GeoDBData.get_lithology_sets(project_id)
-        if success and sets:
+
+        # Use cached sets from invoke() - no duplicate API call
+        sets = self.__class__._cached_sets
+        if sets:
             for lith_set in sets:
                 if lith_set.get('id') == selected_set_id:
                     props.selected_lithology_set_name = lith_set.get('name', f'Set {selected_set_id}')
@@ -471,6 +479,10 @@ class GEODB_OT_LoadLithologyConfig(Operator):
             if not success or not sets:
                 self.report({'ERROR'}, "No lithology sets found for this project")
                 return {'CANCELLED'}
+
+            # Cache sets for execute() and update ConfigCache
+            self.__class__._cached_sets = sets
+            ConfigCache.set_lithology_sets(project_id, sets)
 
             # Build enum items for set selection
             enum_items = []
@@ -658,6 +670,7 @@ class GEODB_OT_LoadAlterationConfig(Operator):
     # Class variables to cache alteration types for the current set
     _cached_alteration_types = []
     _cached_set_id = None
+    _cached_sets = []  # Cache the sets list from invoke()
 
     def execute(self, context):
         scene = context.scene
@@ -685,10 +698,10 @@ class GEODB_OT_LoadAlterationConfig(Operator):
 
             # Save selected set ID and name to scene properties
             props.selected_alteration_set_id = selected_set_id
-            # Get set name from the cached data
-            project_id = int(props.selected_project_id)
-            success, sets = GeoDBData.get_alteration_sets(project_id)
-            if success and sets:
+
+            # Use cached sets from invoke() - no duplicate API call
+            sets = self.__class__._cached_sets
+            if sets:
                 for alt_set in sets:
                     if alt_set.get('id') == selected_set_id:
                         props.selected_alteration_set_name = alt_set.get('name', f'Set {selected_set_id}')
@@ -717,6 +730,10 @@ class GEODB_OT_LoadAlterationConfig(Operator):
         if not success or not sets:
             self.report({'ERROR'}, "Failed to fetch alteration sets or no sets available")
             return {'CANCELLED'}
+
+        # Cache sets for execute() and update ConfigCache
+        self.__class__._cached_sets = sets
+        ConfigCache.set_alteration_sets(project_id, sets)
 
         # Create EnumProperty items for set selection
         set_items = [
@@ -886,6 +903,7 @@ class GEODB_OT_LoadMineralizationConfig(Operator):
     # Class variables to cache mineralization types for the current set
     _cached_mineralization_types = []
     _cached_set_id = None
+    _cached_sets = []  # Cache the sets list from invoke()
 
     def execute(self, context):
         scene = context.scene
@@ -913,10 +931,10 @@ class GEODB_OT_LoadMineralizationConfig(Operator):
 
             # Save selected set ID and name to scene properties
             props.selected_mineralization_set_id = selected_set_id
-            # Get set name from the cached data
-            project_id = int(props.selected_project_id)
-            success, sets = GeoDBData.get_mineralization_sets(project_id)
-            if success and sets:
+
+            # Use cached sets from invoke() - no duplicate API call
+            sets = self.__class__._cached_sets
+            if sets:
                 for min_set in sets:
                     if min_set.get('id') == selected_set_id:
                         props.selected_mineralization_set_name = min_set.get('name', f'Set {selected_set_id}')
@@ -945,6 +963,10 @@ class GEODB_OT_LoadMineralizationConfig(Operator):
         if not success or not sets:
             self.report({'ERROR'}, "Failed to fetch mineralization sets or no sets available")
             return {'CANCELLED'}
+
+        # Cache sets for execute() and update ConfigCache
+        self.__class__._cached_sets = sets
+        ConfigCache.set_mineralization_sets(project_id, sets)
 
         # Create EnumProperty items for set selection
         set_items = [
@@ -1106,34 +1128,44 @@ class GEODB_OT_LoadMineralizationConfig(Operator):
 
 
 class GEODB_OT_VisualizeAssays(Operator):
-    """Visualize assay intervals using the loaded configuration"""
+    """Visualize assay intervals using the loaded configuration (async with progress)"""
     bl_idname = "geodb.visualize_assays"
     bl_label = "Visualize Assays"
     bl_description = "Create curved tube visualization of assay intervals along drill holes"
     bl_options = {'REGISTER', 'UNDO'}
 
-    tube_radius: FloatProperty(
-        name="Tube Radius",
-        description="Radius of the assay tubes",
-        default=0.1,
-        min=0.01,
-        max=2.0
-    )
+    # Multi-stage progress tracking
+    _stages = [
+        ('Validating', 0.05),      # 5% - validation and config lookup
+        ('Fetching samples', 0.60), # 60% - main API call
+        ('Processing data', 0.20),  # 20% - data processing
+        ('Creating meshes', 0.15),  # 15% - mesh creation (main thread)
+    ]
 
-    tube_resolution: IntProperty(
-        name="Tube Resolution",
-        description="Number of vertices around tube circumference",
-        default=8,
-        min=3,
-        max=32
-    )
+    # Async operation state
+    _timer = None
+    _thread = None
+    _progress = 0.0
+    _status = ""
+    _data = None
+    _error = None
+    _cancelled = False
+    _current_stage = 0
 
-    def execute(self, context):
-        # COPIED FROM OLD WORKING CODE (modal_assay_visualization.py)
+    # Store parameters captured from scene props (thread-safe access)
+    _project_id = None
+    _selected_config_id = None
+    _project_name = None
+    _company_id = None
+    _company_name = None
+    _diameter_overrides = {}
+
+    def invoke(self, context, event):
+        """Start the async visualization operation."""
         scene = context.scene
         props = scene.geodb
 
-        # Validate selection
+        # Validate before starting
         if not hasattr(props, 'selected_project_id') or not props.selected_project_id:
             self.report({'ERROR'}, "No project selected")
             return {'CANCELLED'}
@@ -1143,25 +1175,113 @@ class GEODB_OT_VisualizeAssays(Operator):
             return {'CANCELLED'}
 
         try:
-            project_id = int(props.selected_project_id)
+            self.__class__._project_id = int(props.selected_project_id)
         except (ValueError, TypeError):
             self.report({'ERROR'}, "Invalid project ID")
             return {'CANCELLED'}
 
-        selected_config_id = props.selected_assay_config_id
-        project_name = props.selected_project_name or f"Project_{project_id}"
+        # Check if another operation is already running
+        if props.import_active:
+            self.report({'WARNING'}, "Another import operation is already running")
+            return {'CANCELLED'}
+
+        # Capture parameters from scene props (thread-safe)
+        self.__class__._selected_config_id = props.selected_assay_config_id
+        self.__class__._project_name = props.selected_project_name or f"Project_{self._project_id}"
+        self.__class__._company_id = int(props.selected_company_id) if hasattr(props, 'selected_company_id') and props.selected_company_id else 0
+        self.__class__._company_name = props.selected_company_name if hasattr(props, 'selected_company_name') else ''
+
+        # Load diameter overrides from persistent storage
+        import json
+        try:
+            self.__class__._diameter_overrides = json.loads(props.assay_diameter_overrides)
+        except (json.JSONDecodeError, AttributeError):
+            self.__class__._diameter_overrides = {}
+
+        # Mark operation as active
+        props.import_active = True
+        props.import_progress = 0.0
+        props.import_status = "Initializing..."
+
+        # Reset state
+        self.__class__._progress = 0.0
+        self.__class__._status = "Initializing..."
+        self.__class__._data = None
+        self.__class__._error = None
+        self.__class__._cancelled = False
+        self.__class__._current_stage = 0
+
+        # Start background thread
+        import threading
+        self.__class__._thread = threading.Thread(target=self._download_data_wrapper)
+        self.__class__._thread.start()
+
+        # Start modal timer (checks every 0.1 seconds)
+        wm = context.window_manager
+        self.__class__._timer = wm.event_timer_add(0.1, window=context.window)
+        wm.modal_handler_add(self)
+
+        return {'RUNNING_MODAL'}
+
+    def _download_data_wrapper(self):
+        """Wrapper to catch exceptions in download_data."""
+        try:
+            self.download_data()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.__class__._error = str(e)
+
+    def _set_stage(self, index, name=None):
+        """Move to a specific stage and update status."""
+        self.__class__._current_stage = index
+        base_progress = sum(self._stages[i][1] for i in range(index)) if index > 0 else 0.0
+        self.__class__._progress = base_progress
+        if name is None and index < len(self._stages):
+            name = self._stages[index][0]
+        total_stages = len(self._stages)
+        self.__class__._status = f"Stage {index + 1}/{total_stages}: {name}..."
+
+    def _update_stage_progress(self, done, total, stage_name=None):
+        """Update progress within current stage."""
+        if total <= 0:
+            return
+        stage_weight = self._stages[self._current_stage][1] if self._current_stage < len(self._stages) else 0.0
+        base_progress = sum(self._stages[i][1] for i in range(self._current_stage)) if self._current_stage > 0 else 0.0
+        stage_progress = (done / total) * stage_weight
+        self.__class__._progress = base_progress + stage_progress
+
+        if stage_name is None and self._current_stage < len(self._stages):
+            stage_name = self._stages[self._current_stage][0]
+        total_stages = len(self._stages)
+        self.__class__._status = f"Stage {self._current_stage + 1}/{total_stages}: {stage_name}... {done:,}/{total:,}"
+
+    def download_data(self):
+        """Background thread: Fetch data from API (no Blender API calls)."""
+        import json
+
+        # Stage 1: Validate and get config
+        self._set_stage(0, "Validating configuration")
+
+        project_id = self._project_id
+        selected_config_id = self._selected_config_id
+        project_name = self._project_name
+
+        print(f"\n=== Async Assay Visualization for {project_name} ===")
 
         # Fetch assay configuration details
-        print(f"\n=== Plotting Assay Data for {project_name} ===")
         success, configs = GeoDBData.get_assay_range_configurations(project_id)
+        if self._cancelled:
+            return
+
         if not success:
-            self.report({'ERROR'}, "Failed to fetch assay configurations")
-            return {'CANCELLED'}
+            self.__class__._error = "Failed to fetch assay configurations"
+            return
 
         config = next((c for c in configs if c.get('id') == selected_config_id), None)
         if not config:
-            self.report({'ERROR'}, f"Configuration ID {selected_config_id} not found")
-            return {'CANCELLED'}
+            self.__class__._error = f"Configuration ID {selected_config_id} not found"
+            return
 
         config_name = config.get('name', 'Assay')
         element = config.get('element', 'Unknown')
@@ -1172,89 +1292,67 @@ class GEODB_OT_VisualizeAssays(Operator):
         print(f"Configuration: {config_name} ({element} in {units})")
         print(f"Ranges: {len(ranges)}")
 
-        # Load diameter overrides from persistent storage
-        import json
-        try:
-            diameter_overrides = json.loads(props.assay_diameter_overrides)
-            print(f"Loaded {len(diameter_overrides)} diameter overrides from .blend file")
-        except (json.JSONDecodeError, AttributeError):
-            diameter_overrides = {}
-            print("No diameter overrides found, using API defaults")
+        # Stage 2: Fetch samples (the big one)
+        self._set_stage(1, "Fetching samples")
 
-        # Fetch drill samples with desurveyed coordinates
-        # v1.4: Pass assay_config_id so server applies the configuration
         print(f"Fetching drill samples...")
-        success, samples_by_hole = GeoDBData.get_all_samples_for_project(project_id, assay_config_id=selected_config_id)
+        success, samples_by_hole = GeoDBData.get_all_samples_for_project(
+            project_id,
+            assay_config_id=selected_config_id
+        )
+
+        if self._cancelled:
+            return
+
         if not success or not samples_by_hole:
-            self.report({'WARNING'}, "No drill samples found for project")
-            return {'CANCELLED'}
+            self.__class__._error = "No drill samples found for project"
+            return
 
         total_samples = sum(len(v) for v in samples_by_hole.values())
         print(f"Fetched {total_samples} samples across {len(samples_by_hole)} holes")
 
-        # =====================================================================
-        # Save sample data to DrillDataCache for RBF interpolation
-        # =====================================================================
-        # Extract available elements from the fetched samples
+        # Stage 3: Process data (prepare mesh parameters)
+        self._set_stage(2, "Processing data")
+
+        # Extract available elements
         available_elements = set()
         for hole_samples in samples_by_hole.values():
             for sample in hole_samples:
                 assay = sample.get('assay')
                 if assay and isinstance(assay, dict):
-                    elements_list = assay.get('elements', [])
-                    for elem in elements_list:
-                        if isinstance(elem, dict):
-                            elem_name = elem.get('element')
-                            if elem_name:
-                                available_elements.add(elem_name)
+                    for elem in assay.get('elements', []):
+                        if isinstance(elem, dict) and elem.get('element'):
+                            available_elements.add(elem.get('element'))
 
-        # Update cache with sample data so RBF interpolation can use it
-        cache_data = {
-            'project_id': project_id,
-            'company_id': int(props.selected_company_id) if hasattr(props, 'selected_company_id') and props.selected_company_id else 0,
-            'project_name': project_name,
-            'company_name': props.selected_company_name if hasattr(props, 'selected_company_name') else '',
-            'samples': samples_by_hole,
-            'available_elements': sorted(list(available_elements)),
-            'assay_range_configs': configs,  # Save the assay configs too
-        }
-        DrillDataCache.set_cache(cache_data)
-        print(f"✓ Saved {total_samples} samples to DrillDataCache with {len(available_elements)} available elements")
-        print(f"  Elements: {sorted(list(available_elements))}")
+        diameter_overrides = self._diameter_overrides
 
-        # Create master collection
-        master_collection = bpy.data.collections.new(config_name)
-        bpy.context.scene.collection.children.link(master_collection)
-
-        total_meshes_created = 0
+        # Process samples and prepare mesh data (no Blender API calls)
+        processed_holes = []
         total_skipped = 0
-        holes_with_meshes = 0
+        processed_count = 0
+        total_to_process = len(samples_by_hole)
 
-        all_holes_data = []
-
-        # Process each drill hole
         for hole_id, hole_samples in samples_by_hole.items():
+            if self._cancelled:
+                return
+
+            processed_count += 1
+            self._update_stage_progress(processed_count, total_to_process, "Processing data")
+
             if not hole_samples:
                 continue
 
-            hole_name = None
+            # Get hole name
             sample = hole_samples[0]
             bhid = sample.get('bhid')
-
             if isinstance(bhid, dict):
                 hole_name = bhid.get('hole_id') or bhid.get('name')
             elif isinstance(bhid, str):
                 hole_name = bhid
-
-            if not hole_name:
+            else:
                 hole_name = f'Hole_{hole_id}'
 
-            print(f"\nProcessing {hole_name}: {len(hole_samples)} samples")
-
-            hole_collection = bpy.data.collections.new(hole_name)
-            master_collection.children.link(hole_collection)
-
-            hole_meshes = []
+            hole_mesh_data = []
 
             for sample in hole_samples:
                 assay_obj = sample.get('assay', {})
@@ -1288,17 +1386,14 @@ class GEODB_OT_VisualizeAssays(Operator):
 
                 if assay_value is None:
                     total_skipped += 1
-                    if total_skipped == 1:
-                        print(f"  Debug: First sample elements: {elements[:1] if elements else 'No elements'}")
-                        print(f"  Debug: Looking for element: {element}")
                     continue
 
+                # Find matching range
                 matching_range = None
                 matching_range_idx = None
                 for range_idx, range_item in enumerate(ranges):
                     from_val = float(range_item.get('from_value', 0))
                     to_val = float(range_item.get('to_value', float('inf')))
-
                     if from_val <= assay_value < to_val:
                         matching_range = range_item
                         matching_range_idx = range_idx
@@ -1310,10 +1405,8 @@ class GEODB_OT_VisualizeAssays(Operator):
                     label = 'Out of Range'
                 else:
                     color_hex = matching_range.get('color', '#FFFFFF')
-                    size = matching_range.get('size', 2)  # API default
+                    size = matching_range.get('size', 2)
                     label = matching_range.get('label', '')
-
-                    # Check for diameter override (persisted in .blend file)
                     override_key = f"config_{selected_config_id}_range_{matching_range_idx}"
                     if override_key in diameter_overrides:
                         size = diameter_overrides[override_key]
@@ -1324,95 +1417,203 @@ class GEODB_OT_VisualizeAssays(Operator):
                 to_depth = sample.get('to_depth', 0)
 
                 if not xyz_from or not xyz_to:
-                    print(f"  Warning: Sample {sample.get('id')} missing desurveyed coordinates")
                     total_skipped += 1
                     continue
 
+                # Store data for mesh creation in main thread
+                hole_mesh_data.append({
+                    'hole_name': hole_name,
+                    'hole_id': hole_id,
+                    'xyz_from': tuple(xyz_from) if isinstance(xyz_from, (list, tuple)) else xyz_from,
+                    'xyz_to': tuple(xyz_to) if isinstance(xyz_to, (list, tuple)) else xyz_to,
+                    'diameter': float(size),
+                    'color_hex': color_hex,
+                    'from_depth': from_depth,
+                    'to_depth': to_depth,
+                    'element': element,
+                    'assay_value': assay_value,
+                    'assay_unit': assay_unit,
+                    'label': label,
+                    'assay_name': assay_name,
+                    'config_name': config_name,
+                    'all_assay_data': all_assay_data,
+                    'sample_id': sample.get('id'),
+                })
+
+            if hole_mesh_data:
+                processed_holes.append({
+                    'hole_name': hole_name,
+                    'hole_id': hole_id,
+                    'mesh_data': hole_mesh_data,
+                })
+
+        # Store all data for main thread
+        self.__class__._data = {
+            'config_name': config_name,
+            'element': element,
+            'units': units,
+            'project_id': project_id,
+            'project_name': project_name,
+            'company_id': self._company_id,
+            'company_name': self._company_name,
+            'samples_by_hole': samples_by_hole,
+            'available_elements': sorted(list(available_elements)),
+            'configs': configs,
+            'processed_holes': processed_holes,
+            'total_skipped': total_skipped,
+        }
+
+        print(f"Data processing complete: {len(processed_holes)} holes ready for mesh creation")
+
+    def modal(self, context, event):
+        """Called repeatedly while operation runs."""
+        if event.type == 'ESC':
+            self.__class__._cancelled = True
+            self.cancel(context)
+            return {'CANCELLED'}
+
+        if event.type == 'TIMER':
+            # Update progress display in UI
+            context.scene.geodb.import_progress = self._progress
+            context.scene.geodb.import_status = self._status
+            context.area.tag_redraw()
+
+            # Check if thread finished
+            if self._thread and not self._thread.is_alive():
+                if self._cancelled:
+                    self.cleanup(context)
+                    return {'CANCELLED'}
+                elif self._error:
+                    self.report({'ERROR'}, self._error)
+                    self.cleanup(context)
+                    return {'CANCELLED'}
+                else:
+                    try:
+                        self.finish_in_main_thread(context)
+                        self.cleanup(context)
+                        return {'FINISHED'}
+                    except Exception as e:
+                        self.report({'ERROR'}, f"Error creating objects: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        self.cleanup(context)
+                        return {'CANCELLED'}
+
+        return {'PASS_THROUGH'}
+
+    def finish_in_main_thread(self, context):
+        """Main thread: Create Blender meshes and collections."""
+        data = self._data
+        if not data:
+            return
+
+        self._set_stage(3, "Creating meshes")
+
+        config_name = data['config_name']
+        element = data['element']
+        processed_holes = data['processed_holes']
+        total_skipped = data['total_skipped']
+
+        # Update cache for RBF interpolation
+        cache_data = {
+            'project_id': data['project_id'],
+            'company_id': data['company_id'],
+            'project_name': data['project_name'],
+            'company_name': data['company_name'],
+            'samples': data['samples_by_hole'],
+            'available_elements': data['available_elements'],
+            'assay_range_configs': data['configs'],
+        }
+        DrillDataCache.set_cache(cache_data)
+
+        # Create master collection
+        master_collection = bpy.data.collections.new(config_name)
+        bpy.context.scene.collection.children.link(master_collection)
+
+        total_meshes_created = 0
+        holes_with_meshes = 0
+        created_objects = []
+
+        total_holes = len(processed_holes)
+        for hole_idx, hole_data in enumerate(processed_holes):
+            self._update_stage_progress(hole_idx, total_holes, "Creating meshes")
+
+            hole_name = hole_data['hole_name']
+            mesh_data_list = hole_data['mesh_data']
+
+            # Create collection for this hole
+            hole_collection = bpy.data.collections.new(hole_name)
+            master_collection.children.link(hole_collection)
+
+            for mesh_params in mesh_data_list:
                 try:
-                    mesh_name = f"{hole_name}_{from_depth:.1f}-{to_depth:.1f}_{element}_{assay_value:.2f}{assay_unit}"
+                    mesh_name = f"{mesh_params['hole_name']}_{mesh_params['from_depth']:.1f}-{mesh_params['to_depth']:.1f}_{element}_{mesh_params['assay_value']:.2f}{mesh_params['assay_unit']}"
 
                     assay_metadata = {
-                        'active_assay_name': assay_name,
-                        'active_config_name': config_name,
+                        'active_assay_name': mesh_params['assay_name'],
+                        'active_config_name': mesh_params['config_name'],
                         'active_assay_element': element,
-                        'active_assay_value': assay_value,
-                        'active_assay_unit': assay_unit,
-                        'all_elements': all_assay_data,
-                        'sample_id': sample.get('id'),
+                        'active_assay_value': mesh_params['assay_value'],
+                        'active_assay_unit': mesh_params['assay_unit'],
+                        'all_elements': mesh_params['all_assay_data'],
+                        'sample_id': mesh_params['sample_id'],
                     }
 
                     mesh_obj = create_sample_cylinder_mesh(
-                        xyz_from=tuple(xyz_from) if isinstance(xyz_from, (list, tuple)) else xyz_from,
-                        xyz_to=tuple(xyz_to) if isinstance(xyz_to, (list, tuple)) else xyz_to,
-                        diameter=float(size),
-                        color_hex=color_hex,
+                        xyz_from=mesh_params['xyz_from'],
+                        xyz_to=mesh_params['xyz_to'],
+                        diameter=mesh_params['diameter'],
+                        color_hex=mesh_params['color_hex'],
                         name=mesh_name,
-                        material_name=f"Assay_{element}_{label}",
+                        material_name=f"Assay_{element}_{mesh_params['label']}",
                         assay_metadata=assay_metadata
                     )
 
-                    hole_meshes.append({
-                        'obj': mesh_obj,
-                        'hole_name': hole_name,
-                        'hole_id': hole_id,
-                        'element': element,
-                        'assay_value': assay_value,
-                        'assay_unit': assay_unit,
-                        'label': label,
-                        'from_depth': from_depth,
-                        'to_depth': to_depth,
-                    })
+                    # Unlink from default and link to hole collection
+                    for coll in mesh_obj.users_collection:
+                        coll.objects.unlink(mesh_obj)
+                    hole_collection.objects.link(mesh_obj)
+
+                    # Tag with metadata
+                    mesh_obj['geodb_visualization'] = True
+                    mesh_obj['geodb_type'] = 'assay_sample'
+                    mesh_obj['hole_name'] = mesh_params['hole_name']
+                    mesh_obj['active_range_label'] = mesh_params['label']
+
+                    created_objects.append(mesh_obj)
+                    total_meshes_created += 1
 
                 except Exception as e:
-                    print(f"  Error creating mesh for sample: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"Error creating mesh: {e}")
                     total_skipped += 1
-                    continue
 
-            if hole_meshes:
-                all_holes_data.append({
-                    'hole_name': hole_name,
-                    'hole_collection': hole_collection,
-                    'meshes': hole_meshes,
-                })
-                holes_with_meshes += 1
-                total_meshes_created += len(hole_meshes)
-                print(f"  Prepared {len(hole_meshes)} meshes for {hole_name}")
+            holes_with_meshes += 1
 
-        if total_meshes_created == 0:
-            self.report(
-                {'ERROR'},
-                f"No meshes created. No samples with {element} data. (Skipped: {total_skipped})"
-            )
-            return {'CANCELLED'}
-
-        print(f"\nBatch linking and processing {total_meshes_created} meshes...")
-
-        for hole_data in all_holes_data:
-            hole_collection = hole_data['hole_collection']
-            for mesh_data in hole_data['meshes']:
-                mesh_obj = mesh_data['obj']
-
-                for coll in mesh_obj.users_collection:
-                    coll.objects.unlink(mesh_obj)
-                hole_collection.objects.link(mesh_obj)
-
-                mesh_obj['geodb_visualization'] = True
-                mesh_obj['geodb_type'] = 'assay_sample'
-                mesh_obj['hole_name'] = mesh_data['hole_name']
-                mesh_obj['active_range_label'] = mesh_data['label']
-
-        # Auto-adjust view to newly created objects
-        created_objects = [mesh_data['obj'] for hole_data in all_holes_data for mesh_data in hole_data['meshes']]
+        # Auto-adjust view
         adjust_view_to_objects(context, created_objects)
 
-        self.report(
-            {'INFO'},
-            f"Created {total_meshes_created} meshes in {holes_with_meshes} holes (Skipped: {total_skipped})"
-        )
+        if total_meshes_created == 0:
+            self.report({'ERROR'}, f"No meshes created. No samples with {element} data. (Skipped: {total_skipped})")
+        else:
+            self.report({'INFO'}, f"Created {total_meshes_created} meshes in {holes_with_meshes} holes (Skipped: {total_skipped})")
 
-        return {'FINISHED'}
+    def cleanup(self, context):
+        """Clean up timer and mark operation complete."""
+        wm = context.window_manager
+        if self.__class__._timer:
+            wm.event_timer_remove(self.__class__._timer)
+            self.__class__._timer = None
+
+        context.scene.geodb.import_active = False
+        context.scene.geodb.import_progress = 0.0
+        context.scene.geodb.import_status = ""
+        context.area.tag_redraw()
+
+    def cancel(self, context):
+        """User cancelled with ESC key."""
+        self.__class__._cancelled = True
+        self.cleanup(context)
+        self.report({'INFO'}, "Operation cancelled by user")
 
 
 # ============================================================================

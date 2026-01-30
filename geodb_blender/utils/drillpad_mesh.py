@@ -7,6 +7,7 @@ and provides utilities for calculating drill hole geometry.
 
 import bpy
 import bmesh
+import mathutils
 import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -16,7 +17,8 @@ def create_drillpad_mesh(
     vertices_2d: List[List[float]],
     elevation: float,
     extrusion_height: float = 10.0,
-    color_hex: str = "#4CAF50"
+    color_hex: str = "#4CAF50",
+    centroid: Optional[Tuple[float, float, float]] = None
 ) -> bpy.types.Object:
     """
     Create a 3D extruded mesh from a 2D polygon.
@@ -27,6 +29,8 @@ def create_drillpad_mesh(
         elevation: Center elevation in meters
         extrusion_height: Total height of extrusion (default 10m)
         color_hex: Material color
+        centroid: Optional (x, y, z) centroid to offset vertices by.
+                  If provided, vertices_2d are treated as relative to centroid.
 
     Returns:
         bpy.types.Object: The created mesh object
@@ -35,14 +39,26 @@ def create_drillpad_mesh(
     z_bottom = elevation - (extrusion_height / 2)
     z_top = elevation + (extrusion_height / 2)
 
+    # Get centroid for origin placement
+    # If centroid provided, use it; otherwise calculate from vertices
+    if centroid and len(centroid) >= 2:
+        origin_x = centroid[0]
+        origin_y = centroid[1]
+        origin_z = centroid[2] if len(centroid) > 2 else elevation
+    else:
+        # Calculate centroid from vertices
+        origin_x = sum(v[0] for v in vertices_2d) / len(vertices_2d)
+        origin_y = sum(v[1] for v in vertices_2d) / len(vertices_2d)
+        origin_z = elevation
+
     # Create mesh using bmesh for extrusion
     mesh = bpy.data.meshes.new(name)
     bm = bmesh.new()
 
-    # Create bottom face vertices
+    # Create bottom face vertices (relative to origin so mesh is centered)
     bottom_verts = []
     for x, y in vertices_2d:
-        v = bm.verts.new((x, y, z_bottom))
+        v = bm.verts.new((x - origin_x, y - origin_y, z_bottom - origin_z))
         bottom_verts.append(v)
 
     bm.verts.ensure_lookup_table()
@@ -71,8 +87,9 @@ def create_drillpad_mesh(
     bm.free()
     mesh.update()
 
-    # Create object
+    # Create object and set its location to the centroid
     obj = bpy.data.objects.new(name, mesh)
+    obj.location = (origin_x, origin_y, origin_z)
     bpy.context.collection.objects.link(obj)
 
     # Create material
@@ -157,7 +174,10 @@ def create_planned_hole_preview(
     tube_radius: float = 1.0
 ) -> bpy.types.Object:
     """
-    Create a preview cylinder for a planned drill hole.
+    Create a preview tube for a planned drill hole using a Bezier curve.
+
+    Uses a curve with bevel for easy editing - just two control points
+    (collar and toe) that can be moved in Edit Mode.
 
     Args:
         name: Object name
@@ -169,9 +189,9 @@ def create_planned_hole_preview(
         tube_radius: Radius of the preview tube
 
     Returns:
-        bpy.types.Object: Preview mesh object
+        bpy.types.Object: Preview curve object
     """
-    # Calculate end point
+    # Calculate end point (toe)
     az_rad = np.radians(azimuth)
     dip_rad = np.radians(dip)
 
@@ -180,92 +200,42 @@ def create_planned_hole_preview(
     dy = length * np.cos(dip_rad) * np.cos(az_rad)
     dz = length * np.sin(dip_rad)  # Negative dip = negative dz
 
-    end_point = (
+    toe = (
         collar[0] + dx,
         collar[1] + dy,
         collar[2] + dz
     )
 
-    # Create cylinder mesh using bmesh
-    mesh = bpy.data.meshes.new(name)
-    bm = bmesh.new()
+    # Create a new curve data block
+    curve_data = bpy.data.curves.new(name=name, type='CURVE')
+    curve_data.dimensions = '3D'
+    curve_data.resolution_u = 12
+    curve_data.fill_mode = 'FULL'
 
-    # Calculate rotation to align cylinder with hole direction
-    direction = np.array([dx, dy, dz])
-    direction_norm = direction / np.linalg.norm(direction)
+    # Set bevel for tube appearance
+    curve_data.bevel_depth = tube_radius
+    curve_data.bevel_resolution = 4  # Smoothness of the circular cross-section
+    curve_data.use_fill_caps = True  # Cap the ends
 
-    # Create cylinder along Z-axis first, then rotate
-    segments = 8
+    # Create a new spline in the curve
+    spline = curve_data.splines.new(type='BEZIER')
+    spline.bezier_points.add(1)  # We need 2 points total (1 default + 1 added)
 
-    # Create vertices for top and bottom circles
-    bottom_verts = []
-    top_verts = []
+    # Set the collar point (first point)
+    collar_point = spline.bezier_points[0]
+    collar_point.co = collar
+    # Set handles to be straight (vector type) for a straight line
+    collar_point.handle_left_type = 'VECTOR'
+    collar_point.handle_right_type = 'VECTOR'
 
-    for i in range(segments):
-        angle = (2 * np.pi * i) / segments
-        x = tube_radius * np.cos(angle)
-        y = tube_radius * np.sin(angle)
+    # Set the toe point (second point)
+    toe_point = spline.bezier_points[1]
+    toe_point.co = toe
+    toe_point.handle_left_type = 'VECTOR'
+    toe_point.handle_right_type = 'VECTOR'
 
-        # Bottom circle at collar
-        bottom_verts.append(bm.verts.new((x, y, 0)))
-        # Top circle at length
-        top_verts.append(bm.verts.new((x, y, length)))
-
-    bm.verts.ensure_lookup_table()
-
-    # Create faces
-    # Bottom cap
-    bm.faces.new(bottom_verts)
-    # Top cap
-    bm.faces.new(top_verts[::-1])  # Reverse for correct normal
-
-    # Side faces
-    for i in range(segments):
-        next_i = (i + 1) % segments
-        bm.faces.new([
-            bottom_verts[i],
-            bottom_verts[next_i],
-            top_verts[next_i],
-            top_verts[i]
-        ])
-
-    # Calculate rotation matrix
-    z_axis = np.array([0, 0, 1])
-
-    if np.allclose(direction_norm, z_axis):
-        rotation_matrix = np.eye(3)
-    elif np.allclose(direction_norm, -z_axis):
-        rotation_matrix = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
-    else:
-        rotation_axis = np.cross(z_axis, direction_norm)
-        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
-        rotation_angle = np.arccos(np.dot(z_axis, direction_norm))
-
-        K = np.array([
-            [0, -rotation_axis[2], rotation_axis[1]],
-            [rotation_axis[2], 0, -rotation_axis[0]],
-            [-rotation_axis[1], rotation_axis[0], 0]
-        ])
-        rotation_matrix = np.eye(3) + np.sin(rotation_angle) * K + (1 - np.cos(rotation_angle)) * np.dot(K, K)
-
-    # Transform vertices to world space
-    for v in bm.verts:
-        local_point = np.array([v.co.x, v.co.y, v.co.z])
-        rotated = np.dot(rotation_matrix, local_point)
-        v.co.x = rotated[0] + collar[0]
-        v.co.y = rotated[1] + collar[1]
-        v.co.z = rotated[2] + collar[2]
-
-    # Recalculate normals
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-
-    # Transfer to mesh
-    bm.to_mesh(mesh)
-    bm.free()
-    mesh.update()
-
-    # Create object
-    obj = bpy.data.objects.new(name, mesh)
+    # Create the object
+    obj = bpy.data.objects.new(name, curve_data)
     bpy.context.collection.objects.link(obj)
 
     # Create material
@@ -299,7 +269,8 @@ def update_drillpad_mesh(
     obj: bpy.types.Object,
     vertices_2d: List[List[float]],
     elevation: float,
-    extrusion_height: float = 10.0
+    extrusion_height: float = 10.0,
+    centroid: Optional[Tuple[float, float, float]] = None
 ) -> None:
     """
     Update an existing drillpad mesh object with new geometry.
@@ -309,10 +280,24 @@ def update_drillpad_mesh(
         vertices_2d: List of [x, y] vertices defining the polygon boundary
         elevation: Center elevation in meters
         extrusion_height: Total height of extrusion (default 10m)
+        centroid: Optional (x, y, z) centroid to offset vertices by.
+                  If provided, vertices_2d are treated as relative to centroid.
     """
     # Calculate Z bounds (centered on elevation)
     z_bottom = elevation - (extrusion_height / 2)
     z_top = elevation + (extrusion_height / 2)
+
+    # Get centroid for origin placement
+    # If centroid provided, use it; otherwise calculate from vertices
+    if centroid and len(centroid) >= 2:
+        origin_x = centroid[0]
+        origin_y = centroid[1]
+        origin_z = centroid[2] if len(centroid) > 2 else elevation
+    else:
+        # Calculate centroid from vertices
+        origin_x = sum(v[0] for v in vertices_2d) / len(vertices_2d)
+        origin_y = sum(v[1] for v in vertices_2d) / len(vertices_2d)
+        origin_z = elevation
 
     # Get the mesh data
     mesh = obj.data
@@ -320,10 +305,10 @@ def update_drillpad_mesh(
     # Create new geometry using bmesh
     bm = bmesh.new()
 
-    # Create bottom face vertices
+    # Create bottom face vertices (relative to origin so mesh is centered)
     bottom_verts = []
     for x, y in vertices_2d:
-        v = bm.verts.new((x, y, z_bottom))
+        v = bm.verts.new((x - origin_x, y - origin_y, z_bottom - origin_z))
         bottom_verts.append(v)
 
     bm.verts.ensure_lookup_table()
@@ -351,6 +336,9 @@ def update_drillpad_mesh(
     bm.to_mesh(mesh)
     bm.free()
     mesh.update()
+
+    # Update object location to the new centroid
+    obj.location = (origin_x, origin_y, origin_z)
 
 
 def find_existing_drillpad(pad_id: int) -> Optional[bpy.types.Object]:
@@ -398,3 +386,274 @@ def get_pad_centroid(pad_obj: bpy.types.Object, elevation_override: float = None
         pad_obj.get('geodb_centroid_y', 0),
         z_value
     )
+
+
+def extract_hole_endpoints(obj: bpy.types.Object) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+    """
+    Extract collar and toe positions from a planned hole curve.
+
+    For Bezier curves, this extracts the two control point positions directly.
+    The first point is the collar, the second is the toe.
+
+    Args:
+        obj: Blender curve object representing a planned hole
+
+    Returns:
+        Tuple of ((collar_x, collar_y, collar_z), (toe_x, toe_y, toe_z))
+        or None if extraction fails
+    """
+    if not obj:
+        return None
+
+    # Handle curve objects (new format)
+    if obj.type == 'CURVE':
+        curve_data = obj.data
+        if not curve_data.splines or len(curve_data.splines) == 0:
+            return None
+
+        spline = curve_data.splines[0]
+
+        if spline.type == 'BEZIER':
+            if len(spline.bezier_points) < 2:
+                return None
+
+            # Get world matrix for transformation
+            world_matrix = obj.matrix_world
+
+            # First point is collar
+            collar_local = spline.bezier_points[0].co
+            collar_world = world_matrix @ collar_local
+            collar = (collar_world.x, collar_world.y, collar_world.z)
+
+            # Second point is toe
+            toe_local = spline.bezier_points[1].co
+            toe_world = world_matrix @ toe_local
+            toe = (toe_world.x, toe_world.y, toe_world.z)
+
+            return (collar, toe)
+
+        elif spline.type == 'POLY':
+            if len(spline.points) < 2:
+                return None
+
+            world_matrix = obj.matrix_world
+
+            # First point is collar
+            collar_local = spline.points[0].co
+            collar_world = world_matrix @ collar_local.to_3d()
+            collar = (collar_world.x, collar_world.y, collar_world.z)
+
+            # Last point is toe
+            toe_local = spline.points[-1].co
+            toe_world = world_matrix @ toe_local.to_3d()
+            toe = (toe_world.x, toe_world.y, toe_world.z)
+
+            return (collar, toe)
+
+    # Handle mesh objects (legacy format for backwards compatibility)
+    elif obj.type == 'MESH':
+        mesh = obj.data
+
+        if len(mesh.vertices) < 2:
+            return None
+
+        # Get all vertex positions in world space
+        world_matrix = obj.matrix_world
+        world_verts = []
+        for v in mesh.vertices:
+            world_co = world_matrix @ v.co
+            world_verts.append((world_co.x, world_co.y, world_co.z))
+
+        if not world_verts:
+            return None
+
+        # Find min and max Z to identify the two ends
+        z_values = [v[2] for v in world_verts]
+        z_min = min(z_values)
+        z_max = max(z_values)
+
+        z_range = z_max - z_min
+        if z_range < 0.01:
+            return None
+
+        z_tolerance = z_range * 0.1
+
+        # Group vertices by Z level
+        bottom_verts = [v for v in world_verts if abs(v[2] - z_min) < z_tolerance]
+        top_verts = [v for v in world_verts if abs(v[2] - z_max) < z_tolerance]
+
+        if not bottom_verts or not top_verts:
+            return None
+
+        # Calculate centers of each group
+        def center_of_points(points):
+            n = len(points)
+            return (
+                sum(p[0] for p in points) / n,
+                sum(p[1] for p in points) / n,
+                sum(p[2] for p in points) / n
+            )
+
+        bottom_center = center_of_points(bottom_verts)
+        top_center = center_of_points(top_verts)
+
+        # Determine which is collar based on stored value or Z height
+        stored_collar_z = obj.get('geodb_collar_z')
+
+        if stored_collar_z is not None:
+            if abs(bottom_center[2] - stored_collar_z) < abs(top_center[2] - stored_collar_z):
+                collar = bottom_center
+                toe = top_center
+            else:
+                collar = top_center
+                toe = bottom_center
+        else:
+            # Default: higher Z is collar (drilling downward)
+            if bottom_center[2] > top_center[2]:
+                collar = bottom_center
+                toe = top_center
+            else:
+                collar = top_center
+                toe = bottom_center
+
+        return (collar, toe)
+
+    return None
+
+
+def update_hole_mesh_from_geometry(
+    obj: bpy.types.Object,
+    collar: Tuple[float, float, float],
+    azimuth: float,
+    dip: float,
+    length: float,
+    tube_radius: float = 1.0
+) -> None:
+    """
+    Update an existing planned hole curve with new geometry.
+
+    Updates the Bezier curve control points based on new collar position and orientation.
+
+    Args:
+        obj: Existing Blender curve object to update
+        collar: (x, y, z) collar position
+        azimuth: Azimuth in degrees (0-360)
+        dip: Dip in degrees (-90 to 0)
+        length: Hole length in meters
+        tube_radius: Radius of the tube (updates bevel_depth)
+    """
+    if not obj:
+        return
+
+    # Calculate toe position
+    az_rad = np.radians(azimuth)
+    dip_rad = np.radians(dip)
+
+    dx = length * np.cos(dip_rad) * np.sin(az_rad)
+    dy = length * np.cos(dip_rad) * np.cos(az_rad)
+    dz = length * np.sin(dip_rad)
+
+    toe = (
+        collar[0] + dx,
+        collar[1] + dy,
+        collar[2] + dz
+    )
+
+    # Handle curve objects
+    if obj.type == 'CURVE':
+        curve_data = obj.data
+
+        # Update bevel radius if needed
+        curve_data.bevel_depth = tube_radius
+
+        if curve_data.splines and len(curve_data.splines) > 0:
+            spline = curve_data.splines[0]
+
+            if spline.type == 'BEZIER' and len(spline.bezier_points) >= 2:
+                # Get inverse world matrix to convert world coords to local
+                world_matrix_inv = obj.matrix_world.inverted()
+
+                # Convert world coordinates to local
+                collar_local = world_matrix_inv @ mathutils.Vector(collar)
+                toe_local = world_matrix_inv @ mathutils.Vector(toe)
+
+                # Update collar point
+                spline.bezier_points[0].co = collar_local
+                spline.bezier_points[0].handle_left_type = 'VECTOR'
+                spline.bezier_points[0].handle_right_type = 'VECTOR'
+
+                # Update toe point
+                spline.bezier_points[1].co = toe_local
+                spline.bezier_points[1].handle_left_type = 'VECTOR'
+                spline.bezier_points[1].handle_right_type = 'VECTOR'
+
+    # Handle legacy mesh objects
+    elif obj.type == 'MESH':
+        direction = np.array([dx, dy, dz])
+        direction_norm = direction / np.linalg.norm(direction)
+
+        mesh = obj.data
+        bm = bmesh.new()
+
+        segments = 8
+
+        bottom_verts = []
+        top_verts = []
+
+        for i in range(segments):
+            angle = (2 * np.pi * i) / segments
+            x = tube_radius * np.cos(angle)
+            y = tube_radius * np.sin(angle)
+
+            bottom_verts.append(bm.verts.new((x, y, 0)))
+            top_verts.append(bm.verts.new((x, y, length)))
+
+        bm.verts.ensure_lookup_table()
+
+        bm.faces.new(bottom_verts)
+        bm.faces.new(top_verts[::-1])
+
+        for i in range(segments):
+            next_i = (i + 1) % segments
+            bm.faces.new([
+                bottom_verts[i],
+                bottom_verts[next_i],
+                top_verts[next_i],
+                top_verts[i]
+            ])
+
+        # Calculate rotation matrix
+        z_axis = np.array([0, 0, 1])
+
+        if np.allclose(direction_norm, z_axis):
+            rotation_matrix = np.eye(3)
+        elif np.allclose(direction_norm, -z_axis):
+            rotation_matrix = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
+        else:
+            rotation_axis = np.cross(z_axis, direction_norm)
+            rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+            rotation_angle = np.arccos(np.dot(z_axis, direction_norm))
+
+            K = np.array([
+                [0, -rotation_axis[2], rotation_axis[1]],
+                [rotation_axis[2], 0, -rotation_axis[0]],
+                [-rotation_axis[1], rotation_axis[0], 0]
+            ])
+            rotation_matrix = np.eye(3) + np.sin(rotation_angle) * K + (1 - np.cos(rotation_angle)) * np.dot(K, K)
+
+        for v in bm.verts:
+            local_point = np.array([v.co.x, v.co.y, v.co.z])
+            rotated = np.dot(rotation_matrix, local_point)
+            v.co.x = rotated[0] + collar[0]
+            v.co.y = rotated[1] + collar[1]
+            v.co.z = rotated[2] + collar[2]
+
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+        bm.to_mesh(mesh)
+        bm.free()
+        mesh.update()
+
+        obj.location = (0, 0, 0)
+        obj.rotation_euler = (0, 0, 0)
+        obj.scale = (1, 1, 1)
