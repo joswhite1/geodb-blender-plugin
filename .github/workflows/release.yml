@@ -18,9 +18,21 @@ jobs:
 
       - name: Create release zip
         run: |
-          cd geodb_blender
-          zip -r ../geodb_blender.zip .
-          cd ..
+          # Exclude dev/CI files from the release zip
+          zip -r geodb_blender.zip . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x ".claude/*" \
+            -x ".gitignore" \
+            -x ".clinerules" \
+            -x "Docs/*" \
+            -x "release.cmd" \
+            -x "force_reload.py" \
+            -x "make_symlink.txt" \
+            -x "development env.txt" \
+            -x "nul" \
+            -x "*.pyc" \
+            -x "__pycache__/*"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1

@@ -37,6 +37,7 @@ paths_exclude_pattern = [
     "*.pyo",
     ".git/",
     ".gitignore",
+    ".github/",
     ".claude/",
     ".vscode/",
     ".idea/",
@@ -48,5 +49,7 @@ paths_exclude_pattern = [
     "make_symlink.txt",
     "development env.txt",
     ".clinerules",
+    "release.cmd",
+    "nul",
     "NUL",
 ]

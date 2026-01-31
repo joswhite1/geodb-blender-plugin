@@ -1738,21 +1738,55 @@ class GEODB_PT_DrillVisualizationPanel(Panel):
             row.scale_y = 1.5
             row.operator("geodb.visualize_mineralization", text="Create Visualization", icon='MESH_CYLINDER')
 
-        # Terrain Visualization
-        box = layout.box()
-        box.label(text="Terrain Visualization", icon='MESH_GRID')
+
+class GEODB_PT_TerrainVisualizationPanel(Panel):
+    """Panel for terrain visualization"""
+    bl_label = "Terrain Visualization"
+    bl_idname = "GEODB_PT_terrain_visualization"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'geoDB'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        geodb = scene.geodb
+
+        # Check if project is selected
+        if not geodb.selected_project_id:
+            layout.label(text="Please select a project first", icon='ERROR')
+            return
+
+        # Show progress bar if operation is running
+        if geodb.import_active:
+            box = layout.box()
+            box.label(text="Import in Progress...", icon='INFO')
+
+            # Progress bar
+            row = box.row()
+            row.progress(
+                factor=geodb.import_progress,
+                type='BAR',
+                text=geodb.import_status
+            )
+
+            box.label(text="Press ESC to cancel", icon='CANCEL')
+
+            # Disable all import buttons while operation running
+            layout.enabled = False
 
         # Import terrain button with options
-        row = box.row()
+        row = layout.row()
         row.operator("geodb.import_terrain", text="Import Terrain", icon='IMPORT')
 
-        box.label(text="Import DEM mesh with texture overlay", icon='INFO')
+        layout.label(text="Import DEM mesh with texture overlay", icon='INFO')
 
         # Check if terrain mesh is selected - show texture switching option
         obj = context.active_object
         if obj and obj.get('geodb_terrain_resolution'):
-            box.separator()
-            col = box.column(align=True)
+            layout.separator()
+            col = layout.column(align=True)
             col.label(text="Selected Terrain:", icon='MESH_PLANE')
             col.label(text=f"  {obj.name}")
 
@@ -1768,11 +1802,6 @@ class GEODB_PT_DrillVisualizationPanel(Panel):
                 row = col.row()
                 row.operator("geodb.switch_terrain_texture", text="Change Texture", icon='TEXTURE')
 
-        # # Actions
-        # box = layout.box()
-        # box.label(text="Actions", icon='PLAY')
-        # box.operator("geodb.clear_visualizations", icon='TRASH')
-
 
 # ============================================================================
 # REGISTRATION
@@ -1785,6 +1814,7 @@ classes = (
     GEODB_OT_LoadMineralizationConfig,
     GEODB_OT_VisualizeAssays,
     GEODB_PT_DrillVisualizationPanel,
+    GEODB_PT_TerrainVisualizationPanel,
 )
 
 
