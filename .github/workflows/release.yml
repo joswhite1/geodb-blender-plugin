@@ -1,0 +1,43 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create release zip
+        run: |
+          # Exclude dev/CI files from the release zip
+          zip -r geodb_blender.zip . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x ".claude/*" \
+            -x ".gitignore" \
+            -x ".clinerules" \
+            -x "Docs/*" \
+            -x "release.cmd" \
+            -x "force_reload.py" \
+            -x "make_symlink.txt" \
+            -x "development env.txt" \
+            -x "nul" \
+            -x "*.pyc" \
+            -x "__pycache__/*"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: geodb_blender.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
